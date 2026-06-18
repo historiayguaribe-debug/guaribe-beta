@@ -1,0 +1,9 @@
+telebot
+groq
+flask
+psycopg2-binary
+requests
+beautifulsoup4
+PyPDF2
+python-docx
+Pillow
