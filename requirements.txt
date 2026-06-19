@@ -1,10 +1,10 @@
-pyTelegramBotAPI
-Flask
-psycopg2-binary
+telebot
 requests
-beautifulsoup4
+psycopg2-binary
 PyPDF2
 python-docx
+beautifulsoup4
 Pillow
 groq
-gtts
+gTTS
+Flask
