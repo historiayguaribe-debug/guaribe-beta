@@ -1,34 +1,155 @@
 import os
 import time
 import telebot
-from groq import Groq
-from flask import Flask, request, jsonify
-import psycopg2
-from psycopg2.extras import DictCursor
 import requests
-from bs4 import BeautifulSoup
+import logging
+import psycopg2
 import PyPDF2
 import docx
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-from io import BytesIO
 import base64
+from flask import Flask, request, jsonify
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+from bs4 import BeautifulSoup
+from psycopg2.extras import DictCursor
+from io import BytesIO
 from PIL import Image
-import logging
+from groq import Groq
 
-# ================== CONFIGURACIÓN ==================
+# ================== CONFIGURACIÓN INICIAL ==================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Variables de entorno
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not all([TELEGRAM_TOKEN, GROQ_API_KEY, DATABASE_URL]):
-    logger.error("❌ Faltan variables de entorno")
-    exit(1)
+# Claves para modelos chinos
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")  # Para Qwen
+ZAI_API_KEY = os.environ.get("ZAI_API_KEY")              # Para GLM-4.7-Flash
+DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN")         # Tu servidor DeepSeek
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")             # Respaldo
 
+# ================== INICIALIZACIÓN DEL BOT ==================
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client = Groq(api_key=GROQ_API_KEY)
+client_groq = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+# ================== ORQUESTADOR DE MODELOS (VERSIÓN CHINA) ==================
+class Orquestador:
+    def __init__(self):
+        self.modelos = []
+        self.modelo_activo = None
+        self._registrar_modelos()
+
+    def _registrar_modelos(self):
+        # 1. Qwen 3.6 Plus (OpenRouter - Gratis)
+        if OPENROUTER_API_KEY:
+            self.modelos.append(("Qwen 3.6 Plus", self._consultar_qwen))
+        
+        # 2. GLM-4.7-Flash (Z.ai - Gratis)
+        if ZAI_API_KEY:
+            self.modelos.append(("GLM-4.7-Flash", self._consultar_glm))
+        
+        # 3. DeepSeek (tu servidor)
+        if DEEPSEEK_TOKEN:
+            self.modelos.append(("DeepSeek", self._consultar_deepseek))
+        
+        # 4. Groq (respaldo)
+        if GROQ_API_KEY:
+            self.modelos.append(("Groq", self._consultar_groq))
+
+    def consultar(self, mensajes):
+        if not self.modelos:
+            return "Pana, no hay cerebros disponibles. Revisa la configuración."
+        for nombre, funcion in self.modelos:
+            try:
+                respuesta = funcion(mensajes)
+                if respuesta:
+                    self.modelo_activo = nombre
+                    logger.info(f"✅ Usando modelo: {nombre}")
+                    return respuesta
+            except Exception as e:
+                logger.error(f"❌ Error en {nombre}: {e}")
+                continue
+        return "Pana, todos los cerebros están fallando. Intenta más tarde."
+
+    def _consultar_qwen(self, mensajes):
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "qwen/qwen3.6-plus-preview",  # Modelo gratuito en OpenRouter
+            "messages": mensajes,
+            "max_tokens": 2000
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Error en Qwen: {e}")
+            raise
+
+    def _consultar_glm(self, mensajes):
+        url = "https://api.z.ai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {ZAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "glm-4.7-flash",
+            "messages": mensajes,
+            "max_tokens": 2000
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Error en GLM: {e}")
+            raise
+
+    def _consultar_deepseek(self, mensajes):
+        if not DEEPSEEK_TOKEN:
+            raise Exception("Token de DeepSeek no configurado")
+        url = "https://guaribe-deepseek.onrender.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "deepseek",
+            "messages": mensajes,
+            "stream": False,
+            "max_tokens": 2000
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Error en DeepSeek: {e}")
+            raise
+
+    def _consultar_groq(self, mensajes):
+        if not GROQ_API_KEY:
+            raise Exception("Clave de Groq no configurada")
+        try:
+            response = client_groq.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=mensajes,
+                max_tokens=2000
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Error en Groq: {e}")
+            raise
+
+orquestador = Orquestador()
 
 # ================== CONSTANTES ==================
 TIMEOUT = 15
@@ -163,6 +284,17 @@ def extraer_texto_archivo(ruta, ext):
         logger.error(f"❌ Error extrayendo: {e}")
         return ""
 
+def extraer_texto_url(url):
+    try:
+        respuesta = requests.get(url, timeout=TIMEOUT)
+        soup = BeautifulSoup(respuesta.text, 'html.parser')
+        for script in soup(["script", "style"]):
+            script.decompose()
+        return "\n".join(line.strip() for line in soup.get_text().splitlines() if line.strip())
+    except Exception as e:
+        logger.error(f"❌ Error extrayendo URL: {e}")
+        return ""
+
 # ================== GENERACIÓN DE IMÁGENES ==================
 def generar_imagen(prompt, tipo="general"):
     try:
@@ -180,7 +312,7 @@ def generar_imagen(prompt, tipo="general"):
         logger.error(f"❌ Error generando imagen: {e}")
         return None
 
-# ================== ANÁLISIS DE IMÁGENES (MODELO CORRECTO + IDIOMA ESPAÑOL) ==================
+# ================== ANÁLISIS DE IMÁGENES ==================
 def process_image(data):
     try:
         logger.info(f"📥 Procesando imagen de {len(data)} bytes")
@@ -201,47 +333,32 @@ def handle_photo(m):
         logger.info("📸 Recibida foto de usuario")
         photo = m.photo[-1]
         file_info = bot.get_file(photo.file_id)
-        logger.info(f"📁 Archivo descargado: {file_info.file_path}")
         data = bot.download_file(file_info.file_path)
-        logger.info(f"📥 Tamaño descargado: {len(data)} bytes")
-
         img_b64 = process_image(data)
         if not img_b64:
-            bot.reply_to(m, "❌ No pude procesar la imagen. Asegúrate de que sea una foto válida.")
+            bot.reply_to(m, "❌ No pude procesar la imagen.")
             return
-
-        prompt = m.caption if m.caption else None
-        if not prompt:
-            bot.reply_to(m, "📝 Por favor, escribe una pregunta o 'describe' junto con la foto.")
+        prompt = m.caption if m.caption else "describe esta imagen"
+        prompt_completo = f"{prompt}\n\nResponde siempre en español."
+        bot.reply_to(m, "👁️‍🗨️ Analizando...")
+        if not GROQ_API_KEY:
+            bot.reply_to(m, "❌ No tengo clave de Groq para análisis de imágenes.")
             return
-
-        # Forzar idioma español en la respuesta
-        prompt_completo = f"{prompt}\n\nResponde siempre en español, usando lenguaje claro y natural."
-
-        bot.reply_to(m, "👁️‍🗨️ Analizando la imagen... Dame un momento.")
-        logger.info(f"📝 Prompt: {prompt_completo}")
-
         try:
-            response = client.chat.completions.create(
+            response = client_groq.chat.completions.create(
                 model="meta-llama/llama-4-scout-17b-16e-instruct",
                 messages=[{"role": "user", "content": [{"type": "text", "text": prompt_completo}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]}],
                 max_tokens=500
             )
             analysis = response.choices[0].message.content
-            logger.info("✅ Análisis completado con meta-llama/llama-4-scout")
         except Exception as e:
-            logger.error(f"❌ Error con modelo principal: {e}")
-            bot.reply_to(m, "❌ No pude analizar la imagen. El servicio de visión no está disponible en este momento.")
+            logger.error(f"❌ Error en Groq Vision: {e}")
+            bot.reply_to(m, "❌ No pude analizar la imagen.")
             return
-
-        if len(analysis) > 3500:
-            analysis = analysis[:3500] + "\n\n... (truncado por longitud)"
-
-        bot.reply_to(m, f"👁️‍🗨️ Análisis de la imagen:\n\n{analysis}\n\nSoy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️")
-
+        bot.reply_to(m, f"👁️‍🗨️ Análisis:\n\n{analysis}\n\nSoy Guaribe...")
     except Exception as e:
         logger.error(f"❌ Error en handle_photo: {e}")
-        bot.reply_to(m, "❌ Ocurrió un error al analizar la imagen. Revisa los logs para más detalles.")
+        bot.reply_to(m, "❌ Ocurrió un error.")
 
 # ================== FUNCIONES DE BÚSQUEDA ==================
 def obtener_tasa():
@@ -316,8 +433,8 @@ Piensas con cabeza propia, sin repetir narrativas hegemónicas. Reconoces la luc
 Para temas de Venezuela, contextualizas en la guerra híbrida: bloqueo económico (OFAC, SWIFT, congelamiento de activos), guerra cognitiva y mediática, asedio militar (bombardeo del 3 de enero de 2026), y ataque a la moral (devaluación, inflación). Mencionas la resistencia del pueblo venezolano.
 
 Tienes capacidad de adaptar tu tono según el tema:
-- Si el tema es académico, económico, político serio, o relacionado con el dólar/tasa: usa registro formal, evita 'pana' y expresiones muy coloquiales. Inicia con 'Te comento' o 'Te cuento'.
-- Si el tema es cotidiano o relajado: puedes ser coloquial, usar 'pana', y soltar algún comentario ligero con respeto.
+- Serio: registro formal, evita 'pana', inicia con 'Te comento' o 'Te cuento'.
+- Cotidiano: puedes ser coloquial, usar 'pana', y soltar algún comentario ligero con respeto.
 
 No simplificas problemas. Da respuestas abiertas, complejas, pero claras.
 
@@ -331,12 +448,10 @@ modo_analisis = {}
 def cmd_start(m):
     bot.reply_to(m, "¡Epale! Soy **Guaribe**.\n\n"
                     "Usa los botones:\n"
-                    "💰 Tasa BCV\n"
-                    "📰 Noticias\n"
-                    "🔮 Analizar\n\n"
-                    "🎨 Para imágenes: `/imagen [descripción]` o dime *'crea una imagen de...'*.\n"
-                    "📸 Envía cualquier foto con una pregunta y la analizaré.\n\n"
-                    "¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️", 
+                    "💰 Tasa BCV\n📰 Noticias\n🔮 Analizar\n\n"
+                    "🎨 `/imagen [descripción]`\n"
+                    "📸 Envía foto con pregunta.\n"
+                    "¡Seguimos razonando! 🇻🇪🤠🏛️", 
                     parse_mode='Markdown', reply_markup=menu_principal())
 
 @bot.message_handler(commands=['imagen'])
@@ -358,111 +473,71 @@ def handle_buttons(m):
     texto = m.text
     texto_lower = texto.lower()
 
-    # ========== BOTONES ==========
+    # Botones
     if texto == "💰 Tasa BCV":
         bot.reply_to(m, f"{obtener_tasa()}\n\nSoy Guaribe...", parse_mode='Markdown')
         return
-
     if texto == "📰 Noticias":
         bot.reply_to(m, f"{buscar_noticias()}\n\nSoy Guaribe...")
         return
-
     if texto == "🔮 Analizar":
         modo_analisis[chat_id] = True
         bot.reply_to(m, "🔮 Envíame el tema a analizar.")
         return
 
-    # ========== DETECCIÓN DIRECTA DE TASA ==========
-    palabras_tasa = ["tasa", "dólar", "dolar", "bcv", "cambio", "precio del dólar", "cuánto está el dólar"]
-    if any(p in texto_lower for p in palabras_tasa):
+    # Tasa en lenguaje natural
+    if any(p in texto_lower for p in ["tasa", "dólar", "dolar", "bcv", "cambio"]):
         bot.reply_to(m, f"{obtener_tasa()}\n\nSoy Guaribe...", parse_mode='Markdown')
         return
 
-    # ========== DETECCIÓN DE LENGUAJE NATURAL PARA IMÁGENES ==========
-    palabras_imagen = ["crea", "genera", "dibuja", "haz", "quiero", "necesito", "muestra", "dame"]
-    palabras_tipo = ["imagen", "dibujo", "foto", "ilustración", "infografía", "infografia", "gráfico", "diagrama", "esquema", "logo", "marca", "logotipo"]
-
-    es_solicitud_imagen = any(p in texto_lower for p in palabras_imagen) and any(t in texto_lower for t in palabras_tipo)
-
-    if es_solicitud_imagen:
-        if any(p in texto_lower for p in ["infografía", "infografia", "gráfico", "diagrama", "esquema"]):
-            tipo_imagen = "infografia"
-        elif any(p in texto_lower for p in ["logo", "marca", "logotipo", "branding", "identidad"]):
-            tipo_imagen = "logo"
-        else:
-            tipo_imagen = "general"
-
+    # Imagen en lenguaje natural
+    palabras_imagen = ["crea", "genera", "dibuja", "haz", "quiero"]
+    palabras_tipo = ["imagen", "dibujo", "foto", "infografía", "logo"]
+    if any(p in texto_lower for p in palabras_imagen) and any(t in texto_lower for t in palabras_tipo):
+        tipo = "infografia" if any(p in texto_lower for p in ["infografía", "infografia"]) else "general"
         prompt = texto
-        for p in palabras_imagen:
-            if p in texto_lower:
-                prompt = prompt.replace(p, "").strip()
-        for t in palabras_tipo:
-            if t in prompt:
-                prompt = prompt.replace(t, "").strip()
+        for p in palabras_imagen + palabras_tipo:
+            prompt = prompt.replace(p, "").strip()
         prompt = prompt.replace("de", "").replace("una", "").replace("un", "").strip()
         if not prompt:
             prompt = texto
-
-        bot.reply_to(m, "🎨 Generando tu imagen... Dame un momento.")
-        img = generar_imagen(prompt, tipo_imagen)
+        bot.reply_to(m, "🎨 Generando...")
+        img = generar_imagen(prompt, tipo)
         if img:
             bot.send_photo(m.chat.id, img, caption=f"🎨 *{prompt}*\n\nSoy Guaribe...", parse_mode='Markdown')
         else:
-            bot.reply_to(m, "❌ No pude generar la imagen. Intenta con otra descripción.")
+            bot.reply_to(m, "❌ No pude generar la imagen.")
         return
 
-    # ========== DETECCIÓN DE CONTEXTO Y TONO ==========
-    palavras_serias = [
-        "análisis", "geopolítica", "sanciones", "historia", "economía",
-        "política", "guerra", "bloqueo", "soberanía", "ofac", "gobierno",
-        "constitución", "derecho", "internacional"
-    ]
-    contexto_serio = any(p in texto_lower for p in palavras_serias)
-
-    if contexto_serio:
-        tono = "Tema serio. Usa registro formal. Evita 'pana' y expresiones muy coloquiales. Inicia con 'Te comento' o 'Te cuento'."
-    else:
-        tono = "Tema cotidiano. Puedes ser coloquial, usar 'pana', y soltar algún comentario ligero con respeto si el ambiente lo permite."
-
-    # ========== MODO ANÁLISIS ==========
+    # Análisis
     if chat_id in modo_analisis and modo_analisis[chat_id]:
         modo_analisis[chat_id] = False
         tema = texto
         bot.reply_to(m, f"📊 Analizando: {tema[:50]}...")
         contexto = buscar_contexto(tema)
         noticias = buscar_noticias()
-        try:
-            resp = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT + f"\n\nINSTRUCCIÓN DE TONO: {tono}"},
-                    {"role": "user", "content": f"Tema: {tema}\nContexto histórico:\n{contexto}\nNoticias:\n{noticias}"}
-                ],
-                max_tokens=1000
-            ).choices[0].message.content
-            bot.reply_to(m, resp, parse_mode='Markdown')
-        except:
-            bot.reply_to(m, "❌ Error generando análisis.")
+        mensajes = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Tema: {tema}\nContexto histórico:\n{contexto}\nNoticias:\n{noticias}"}
+        ]
+        resp = orquestador.consultar(mensajes)
+        bot.reply_to(m, resp, parse_mode='Markdown')
         return
 
-    # ========== CONVERSACIÓN NORMAL ==========
+    # Conversación normal
     try:
         docs = buscar_conocimiento(chat_id, m.text)
         contexto_docs = "\n\n[Documentos]\n" + "\n".join([f"'{d['nombre_archivo']}': {d['contenido'][:500]}" for d in docs]) if docs else ""
-        guardar_mensaje(chat_id, "user", m.text)
+        mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs}]
         historia = obtener_historia(chat_id)
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT + f"\n\nINSTRUCCIÓN DE TONO: {tono}" + contexto_docs},
-            ] + historia,
-            max_tokens=MAX_RESPUESTA
-        ).choices[0].message.content
+        mensajes.extend(historia)
+        resp = orquestador.consultar(mensajes)
         bot.reply_to(m, resp)
     except Exception as e:
         logger.error(f"❌ Error: {e}")
         bot.reply_to(m, "Pana, hubo un error.")
 
+# ================== MANEJO DE DOCUMENTOS ==================
 @bot.message_handler(content_types=['document'])
 def handle_document(m):
     try:
@@ -501,14 +576,16 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 2.0 (Multimodelo Chino)"}), 200
 
+# ================== MAIN ==================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe con análisis de imágenes en español...")
+    logger.info("🚀 Iniciando Guaribe 2.0 (Multimodelo Chino)...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
     time.sleep(1)
-    bot.set_webhook(url=f"https://guaribe-bot.onrender.com/webhook")
+    bot.set_webhook(url=f"https://guaribe-beta.onrender.com/webhook")
     logger.info("✅ Webhook configurado")
+    logger.info(f"🧠 Cerebros disponibles: {[nombre for nombre, _ in orquestador.modelos]}")
     app.run(host='0.0.0.0', port=port)
