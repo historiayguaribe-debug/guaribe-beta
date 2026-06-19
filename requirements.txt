@@ -1,9 +1,10 @@
-telebot
-groq
-flask
+pyTelegramBotAPI
+Flask
 psycopg2-binary
 requests
 beautifulsoup4
 PyPDF2
 python-docx
 Pillow
+groq
+gtts
