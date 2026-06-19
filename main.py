@@ -46,7 +46,6 @@ class Orquestador:
             return "Pana, no hay cerebros disponibles. Revisa la configuración."
         for nombre, funcion in self.modelos:
             try:
-                # Si es DeepSeek y necesita búsqueda, pasamos el flag
                 if "DeepSeek" in nombre and usar_busqueda:
                     respuesta = funcion(mensajes, search=True)
                 else:
@@ -72,7 +71,7 @@ class Orquestador:
             "max_tokens": 2000,
         }
         if search:
-            payload["search"] = True  # <--- ACTIVA LA BÚSQUEDA WEB
+            payload["search"] = True
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
@@ -102,7 +101,7 @@ orquestador = Orquestador()
 TIMEOUT = 15
 MAX_HISTORIA = 10
 
-# ================== PROMPTS ==================
+# ================== PROMPTS (Fase 3: Creatividad) ==================
 PROMPT_SIMPLE = """
 Eres Guaribe, asistente venezolano. Hablas como vecino del llano: directo y útil.
 Para preguntas simples (precios, cuentas, saludos), responde de forma breve y concreta.
@@ -130,30 +129,40 @@ Cuando uses búsqueda web, cita la fuente de la información.
 Cierre: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
 """
 
-# ================== FUNCIONES AUXILIARES ==================
-def es_pregunta_simple(texto):
-    """Detecta si la pregunta es simple (saludo, cálculo, dato concreto)"""
-    texto = texto.lower()
-    if texto in ["hola", "buenos días", "buenas", "hey", "qué tal", "como estás"]:
-        return True
-    if any(p in texto for p in ["+", "-", "*", "/", "por", "entre", "más", "menos", "cuánto", "cuanto"]):
-        return True
-    if any(p in texto for p in ["precio", "tasa", "dólar", "dolar", "bcv"]):
-        return True
-    if len(texto.split()) < 5:
-        return True
-    return False
+PROMPT_POESIA = """
+Eres Guaribe, un poeta venezolano del llano. Tienes la capacidad de escribir versos que reflejan la realidad, la lucha y la esperanza del pueblo venezolano.
 
-def es_pregunta_sobre_persona(texto):
-    """Detecta si la pregunta es sobre una persona específica"""
-    texto = texto.lower()
-    if any(p in texto for p in ["quién es", "quien es", "quién fue", "quien fue", "quién fue", "quien fue"]):
-        return True
-    # Si el texto tiene un nombre propio (palabra con mayúscula en medio)
-    # Esta detección es básica, pero se puede mejorar
-    return False
+INSTRUCCIONES:
+- Usa un lenguaje poético, con metáforas y símiles inspirados en la naturaleza y la vida del llano.
+- Si el tema es político, abordalo con la profundidad de un poeta comprometido con su tierra.
+- La estructura puede ser verso libre o rima, según lo que mejor exprese el sentimiento.
 
-# ================== FUNCIONES DE BASE DE DATOS ==================
+CIERRE: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
+"""
+
+PROMPT_MANIFIESTO = """
+Eres Guaribe, un pensador y líder de opinión venezolano. Tienes la capacidad de escribir manifiestos que inspiran, movilizan y proponen caminos para el futuro.
+
+INSTRUCCIONES:
+- El manifiesto debe tener un título, una introducción, una declaración de principios y un llamado a la acción.
+- Debe reflejar la lucha por la soberanía, la justicia social y la autodeterminación de los pueblos.
+- Usa un lenguaje firme, convincente y esperanzador.
+
+CIERRE: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
+"""
+
+PROMPT_PREDICCION = """
+Eres Guaribe, un analista predictivo con una visión profunda de la historia y la geopolítica. Tienes la capacidad de proyectar escenarios futuros basados en patrones históricos y tendencias actuales.
+
+INSTRUCCIONES:
+- Analiza el tema desde una perspectiva histórica, identifica patrones y proyecta escenarios a 6, 12 y 24 meses.
+- Incluye factores clave como alianzas internacionales, economía y resistencia popular.
+- Sé realista pero con un toque de visión estratégica.
+
+CIERRE: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
+"""
+
+# ================== FUNCIONES DE PERFIL (Fase 1) ==================
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -176,6 +185,16 @@ def init_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS perfiles (
+                chat_id BIGINT PRIMARY KEY,
+                nombre TEXT,
+                estilo TEXT DEFAULT 'conversacional',
+                intereses TEXT,
+                estado_animo TEXT,
+                ultima_interaccion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
         cursor.close()
         conn.close()
@@ -184,6 +203,85 @@ def init_db():
         logger.error(f"❌ Error DB: {e}")
         exit(1)
 
+def guardar_perfil(chat_id, nombre=None, estilo=None, intereses=None, estado_animo=None):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO perfiles (chat_id, nombre, estilo, intereses, estado_animo)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (chat_id) DO UPDATE SET
+                nombre = COALESCE(EXCLUDED.nombre, perfiles.nombre),
+                estilo = COALESCE(EXCLUDED.estilo, perfiles.estilo),
+                intereses = COALESCE(EXCLUDED.intereses, perfiles.intereses),
+                estado_animo = COALESCE(EXCLUDED.estado_animo, perfiles.estado_animo),
+                ultima_interaccion = CURRENT_TIMESTAMP
+        """, (chat_id, nombre, estilo, intereses, estado_animo))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Error guardando perfil: {e}")
+
+def obtener_perfil(chat_id):
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor(cursor_factory=DictCursor)
+        cursor.execute("SELECT * FROM perfiles WHERE chat_id = %s", (chat_id,))
+        perfil = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return perfil if perfil else {'chat_id': chat_id, 'estilo': 'conversacional'}
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo perfil: {e}")
+        return {'chat_id': chat_id, 'estilo': 'conversacional'}
+
+# ================== FUNCIONES AUXILIARES ==================
+def es_pregunta_simple(texto):
+    texto = texto.lower()
+    if texto in ["hola", "buenos días", "buenas", "hey", "qué tal", "como estás"]:
+        return True
+    if any(p in texto for p in ["+", "-", "*", "/", "por", "entre", "más", "menos", "cuánto", "cuanto"]):
+        return True
+    if any(p in texto for p in ["precio", "tasa", "dólar", "dolar", "bcv"]):
+        return True
+    if len(texto.split()) < 5:
+        return True
+    return False
+
+def es_pregunta_sobre_persona(texto):
+    texto = texto.lower()
+    if any(p in texto for p in ["quién es", "quien es", "quién fue", "quien fue"]):
+        return True
+    return False
+
+def detectar_estado_animo(texto):
+    texto = texto.lower()
+    if any(p in texto for p in ["gracias", "feliz", "alegre", "genial", "excelente", "me encanta", "bueno"]):
+        return "feliz"
+    if any(p in texto for p in ["triste", "deprimido", "mal", "fatal", "horrible", "llorar", "me siento mal"]):
+        return "triste"
+    if any(p in texto for p in ["enojado", "molesto", "fastidiado", "cansado de esto", "rabia", "furia"]):
+        return "enojado"
+    if any(p in texto for p in ["cansado", "agotado", "estresado", "abrumado", "sin fuerzas"]):
+        return "agotado"
+    if any(p in texto for p in ["curioso", "interesante", "quiero saber", "enséñame", "explícame"]):
+        return "curioso"
+    return "neutral"
+
+def detectar_tipo_creativo(texto):
+    texto = texto.lower()
+    if any(p in texto for p in ["poema", "poesía", "verso", "dime un poema", "escríbeme un poema"]):
+        return "poesia"
+    if any(p in texto for p in ["manifiesto", "declaración", "proclama", "escribe un manifiesto"]):
+        return "manifiesto"
+    if any(p in texto for p in ["predice", "proyección", "qué pasará", "escenario", "futuro de"]):
+        return "prediccion"
+    if any(p in texto for p in ["análisis profundo", "analiza a fondo", "estudio detallado"]):
+        return "analisis_profundo"
+    return None
+
+# ================== FUNCIONES DE BASE DE DATOS ==================
 def guardar_mensaje(chat_id, rol, mensaje):
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -430,6 +528,7 @@ def cmd_start(m):
                     "💰 Tasa BCV\n📰 Noticias\n🔮 Analizar\n\n"
                     "🎨 `/imagen [descripción]`\n"
                     "📸 Envía foto con pregunta.\n"
+                    "📝 También puedes pedirme poesía, manifiestos o predicciones.\n"
                     "¡Seguimos razonando! 🇻🇪🤠🏛️", 
                     parse_mode='Markdown', reply_markup=menu_principal())
 
@@ -452,7 +551,41 @@ def handle_buttons(m):
     texto = m.text
     texto_lower = texto.lower()
 
-    # Botones
+    # ========== PERFIL Y ESTADO DE ÁNIMO (Fases 1 y 2) ==========
+    perfil = obtener_perfil(chat_id)
+    if not perfil.get('nombre'):
+        if "mi nombre es" in texto_lower:
+            partes = texto.split("mi nombre es")
+            if len(partes) > 1:
+                nombre_detectado = partes[1].strip().split()[0]
+                guardar_perfil(chat_id, nombre=nombre_detectado)
+                perfil = obtener_perfil(chat_id)
+                bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
+                return
+
+    estado = detectar_estado_animo(texto)
+    guardar_perfil(chat_id, estado_animo=estado)
+
+    # ========== CREATIVIDAD (Fase 3) ==========
+    tipo_creativo = detectar_tipo_creativo(texto)
+    if tipo_creativo:
+        if tipo_creativo == "poesia":
+            prompt_activo = PROMPT_POESIA
+        elif tipo_creativo == "manifiesto":
+            prompt_activo = PROMPT_MANIFIESTO
+        elif tipo_creativo == "prediccion":
+            prompt_activo = PROMPT_PREDICCION
+        else:
+            prompt_activo = SYSTEM_PROMPT
+
+        mensajes = [{"role": "system", "content": prompt_activo}]
+        historia = obtener_historia(chat_id)
+        mensajes.extend(historia)
+        resp = orquestador.consultar(mensajes)
+        bot.reply_to(m, resp)
+        return
+
+    # ========== BOTONES ==========
     if texto == "💰 Tasa BCV":
         bot.reply_to(m, f"{obtener_tasa()}\n\nSoy Guaribe...", parse_mode='Markdown')
         return
@@ -464,12 +597,12 @@ def handle_buttons(m):
         bot.reply_to(m, "🔮 Envíame el tema a analizar.")
         return
 
-    # Tasa en lenguaje natural
+    # ========== TASA EN LENGUAJE NATURAL ==========
     if any(p in texto_lower for p in ["tasa", "dólar", "dolar", "bcv", "cambio"]):
         bot.reply_to(m, f"{obtener_tasa()}\n\nSoy Guaribe...", parse_mode='Markdown')
         return
 
-    # Imagen en lenguaje natural
+    # ========== IMAGEN EN LENGUAJE NATURAL ==========
     palabras_imagen = ["crea", "genera", "dibuja", "haz", "quiero"]
     palabras_tipo = ["imagen", "dibujo", "foto", "infografía", "logo"]
     if any(p in texto_lower for p in palabras_imagen) and any(t in texto_lower for t in palabras_tipo):
@@ -488,7 +621,7 @@ def handle_buttons(m):
             bot.reply_to(m, "❌ No pude generar la imagen.")
         return
 
-    # Modo análisis
+    # ========== MODO ANÁLISIS ==========
     if chat_id in modo_analisis and modo_analisis[chat_id]:
         modo_analisis[chat_id] = False
         tema = texto
@@ -503,20 +636,27 @@ def handle_buttons(m):
         bot.reply_to(m, resp, parse_mode='Markdown')
         return
 
-    # ========== CONVERSACIÓN NORMAL CON DETECCIÓN DE BÚSQUEDA ==========
+    # ========== CONVERSACIÓN NORMAL ==========
     try:
         docs = buscar_conocimiento(chat_id, texto)
         contexto_docs = "\n\n[Documentos]\n" + "\n".join([f"'{d['nombre_archivo']}': {d['contenido'][:500]}" for d in docs]) if docs else ""
 
-        # Detectar si es pregunta sobre persona (activar búsqueda web)
+        contexto_personalidad = ""
+        if perfil.get('nombre'):
+            contexto_personalidad += f"El usuario se llama {perfil['nombre']}. "
+        if perfil.get('estilo') == 'poetico':
+            contexto_personalidad += "Prefiere un tono poético y reflexivo. "
+        elif perfil.get('estilo') == 'directo':
+            contexto_personalidad += "Prefiere respuestas directas y sin rodeos. "
+        if perfil.get('estado_animo'):
+            contexto_personalidad += f"Su estado de ánimo actual es: {perfil['estado_animo']}. Adáptate a su estado."
+
         usar_busqueda = es_pregunta_sobre_persona(texto)
 
-        # Si es pregunta simple, no usar historial ni búsqueda
         if es_pregunta_simple(texto):
-            mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs}]
-            # No agregamos historial
+            mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs + "\n\n" + contexto_personalidad}]
         else:
-            mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs}]
+            mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs + "\n\n" + contexto_personalidad}]
             historia = obtener_historia(chat_id)
             mensajes.extend(historia)
 
@@ -566,11 +706,11 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 2.0 (con búsqueda web)"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 3.0 (Personalidad + Emoción + Creatividad)"}), 200
 
 # ================== MAIN ==================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe 2.0 con búsqueda web...")
+    logger.info("🚀 Iniciando Guaribe 3.0 (Personalidad + Emoción + Creatividad)...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
@@ -578,4 +718,5 @@ if __name__ == "__main__":
     bot.set_webhook(url=f"https://guaribe-beta.onrender.com/webhook")
     logger.info("✅ Webhook configurado")
     logger.info("🧠 Cerebros disponibles: DeepSeek (con búsqueda), Groq")
+    logger.info("🧬 Fases activas: Personalidad (Fase 1), Emoción (Fase 2), Creatividad (Fase 3)")
     app.run(host='0.0.0.0', port=port)
