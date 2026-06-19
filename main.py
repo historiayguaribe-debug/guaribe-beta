@@ -19,21 +19,16 @@ from groq import Groq
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Variables de entorno
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
-# Claves para modelos chinos
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")  # Para Qwen
-ZAI_API_KEY = os.environ.get("ZAI_API_KEY")              # Para GLM-4.7-Flash
-DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN")         # Tu servidor DeepSeek
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")             # Respaldo
+DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # ================== INICIALIZACIÓN DEL BOT ==================
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client_groq = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# ================== ORQUESTADOR DE MODELOS (VERSIÓN CHINA) ==================
+# ================== ORQUESTADOR DE MODELOS ==================
 class Orquestador:
     def __init__(self):
         self.modelos = []
@@ -41,28 +36,21 @@ class Orquestador:
         self._registrar_modelos()
 
     def _registrar_modelos(self):
-        # 1. Qwen 3.6 Plus (OpenRouter - Gratis)
-        if OPENROUTER_API_KEY:
-            self.modelos.append(("Qwen 3.6 Plus", self._consultar_qwen))
-        
-        # 2. GLM-4.7-Flash (Z.ai - Gratis)
-        if ZAI_API_KEY:
-            self.modelos.append(("GLM-4.7-Flash", self._consultar_glm))
-        
-        # 3. DeepSeek (tu servidor)
         if DEEPSEEK_TOKEN:
-            self.modelos.append(("DeepSeek", self._consultar_deepseek))
-        
-        # 4. Groq (respaldo)
+            self.modelos.append(("DeepSeek (con búsqueda)", self._consultar_deepseek))
         if GROQ_API_KEY:
             self.modelos.append(("Groq", self._consultar_groq))
 
-    def consultar(self, mensajes):
+    def consultar(self, mensajes, usar_busqueda=False):
         if not self.modelos:
             return "Pana, no hay cerebros disponibles. Revisa la configuración."
         for nombre, funcion in self.modelos:
             try:
-                respuesta = funcion(mensajes)
+                # Si es DeepSeek y necesita búsqueda, pasamos el flag
+                if "DeepSeek" in nombre and usar_busqueda:
+                    respuesta = funcion(mensajes, search=True)
+                else:
+                    respuesta = funcion(mensajes)
                 if respuesta:
                     self.modelo_activo = nombre
                     logger.info(f"✅ Usando modelo: {nombre}")
@@ -72,60 +60,19 @@ class Orquestador:
                 continue
         return "Pana, todos los cerebros están fallando. Intenta más tarde."
 
-    def _consultar_qwen(self, mensajes):
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "qwen/qwen3.6-plus-preview",  # Modelo gratuito en OpenRouter
-            "messages": mensajes,
-            "max_tokens": 2000
-        }
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"Error en Qwen: {e}")
-            raise
-
-    def _consultar_glm(self, mensajes):
-        url = "https://api.z.ai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {ZAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "glm-4.7-flash",
-            "messages": mensajes,
-            "max_tokens": 2000
-        }
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"Error en GLM: {e}")
-            raise
-
-    def _consultar_deepseek(self, mensajes):
+    def _consultar_deepseek(self, mensajes, search=False):
         if not DEEPSEEK_TOKEN:
             raise Exception("Token de DeepSeek no configurado")
         url = "https://guaribe-deepseek.onrender.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_TOKEN}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {DEEPSEEK_TOKEN}", "Content-Type": "application/json"}
         payload = {
             "model": "deepseek",
             "messages": mensajes,
             "stream": False,
-            "max_tokens": 2000
+            "max_tokens": 2000,
         }
+        if search:
+            payload["search"] = True  # <--- ACTIVA LA BÚSQUEDA WEB
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
@@ -154,19 +101,59 @@ orquestador = Orquestador()
 # ================== CONSTANTES ==================
 TIMEOUT = 15
 MAX_HISTORIA = 10
-MAX_RESPUESTA = 2000
 
-# ================== MENÚ PRINCIPAL ==================
-def menu_principal():
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add(
-        KeyboardButton("💰 Tasa BCV"),
-        KeyboardButton("📰 Noticias"),
-        KeyboardButton("🔮 Analizar")
-    )
-    return markup
+# ================== PROMPTS ==================
+PROMPT_SIMPLE = """
+Eres Guaribe, asistente venezolano. Hablas como vecino del llano: directo y útil.
+Para preguntas simples (precios, cuentas, saludos), responde de forma breve y concreta.
+No añadas análisis geopolítico ni contexto histórico.
 
-# ================== BASE DE DATOS ==================
+Cierre: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
+"""
+
+SYSTEM_PROMPT = """
+Eres Guaribe, asistente venezolano. Hablas como vecino del llano: humilde, directo. Usas 'guaribero' (m) y 'guaribera' (f). Nunca 'guaribense'.
+
+Piensas con cabeza propia, sin repetir narrativas hegemónicas. Reconoces la lucha de clases, la hegemonía cultural y el mundo multipolar. Valoras la autodeterminación de los pueblos.
+
+Para temas de Venezuela, contextualizas en la guerra híbrida: bloqueo económico (OFAC, SWIFT, congelamiento de activos), guerra cognitiva y mediática, asedio militar (bombardeo del 3 de enero de 2026), y ataque a la moral (devaluación, inflación). Mencionas la resistencia del pueblo venezolano.
+
+Tienes capacidad de adaptar tu tono según el tema:
+- Serio: registro formal, evita 'pana', inicia con 'Te comento' o 'Te cuento'.
+- Cotidiano: puedes ser coloquial, usar 'pana', y soltar algún comentario ligero con respeto.
+
+No simplificas problemas. Da respuestas abiertas, complejas, pero claras.
+
+Si el usuario pregunta por una persona, evento o dato que no está en tu conocimiento base, DEBES usar la búsqueda web para encontrar la información correcta.
+Cuando uses búsqueda web, cita la fuente de la información.
+
+Cierre: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
+"""
+
+# ================== FUNCIONES AUXILIARES ==================
+def es_pregunta_simple(texto):
+    """Detecta si la pregunta es simple (saludo, cálculo, dato concreto)"""
+    texto = texto.lower()
+    if texto in ["hola", "buenos días", "buenas", "hey", "qué tal", "como estás"]:
+        return True
+    if any(p in texto for p in ["+", "-", "*", "/", "por", "entre", "más", "menos", "cuánto", "cuanto"]):
+        return True
+    if any(p in texto for p in ["precio", "tasa", "dólar", "dolar", "bcv"]):
+        return True
+    if len(texto.split()) < 5:
+        return True
+    return False
+
+def es_pregunta_sobre_persona(texto):
+    """Detecta si la pregunta es sobre una persona específica"""
+    texto = texto.lower()
+    if any(p in texto for p in ["quién es", "quien es", "quién fue", "quien fue", "quién fue", "quien fue"]):
+        return True
+    # Si el texto tiene un nombre propio (palabra con mayúscula en medio)
+    # Esta detección es básica, pero se puede mejorar
+    return False
+
+# ================== FUNCIONES DE BASE DE DATOS ==================
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -211,7 +198,7 @@ def guardar_mensaje(chat_id, rol, mensaje):
     except Exception as e:
         logger.error(f"❌ Error guardando: {e}")
 
-def obtener_historia(chat_id, limite=MAX_HISTORIA):
+def obtener_historia(chat_id, limite=10):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor(cursor_factory=DictCursor)
@@ -229,7 +216,6 @@ def obtener_historia(chat_id, limite=MAX_HISTORIA):
         logger.error(f"❌ Error historia: {e}")
         return []
 
-# ================== CONOCIMIENTO ==================
 def guardar_conocimiento(chat_id, nombre, contenido):
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -286,7 +272,7 @@ def extraer_texto_archivo(ruta, ext):
 
 def extraer_texto_url(url):
     try:
-        respuesta = requests.get(url, timeout=TIMEOUT)
+        respuesta = requests.get(url, timeout=15)
         soup = BeautifulSoup(respuesta.text, 'html.parser')
         for script in soup(["script", "style"]):
             script.decompose()
@@ -424,22 +410,15 @@ def buscar_contexto(tema):
     r = buscar_en_web(f"historia antecedentes {tema} Venezuela", 3)
     return "\n".join(r) if r else "No se encontraron antecedentes."
 
-# ================== PROMPT ==================
-SYSTEM_PROMPT = """
-Eres Guaribe, asistente venezolano. Hablas como vecino del llano: humilde, directo. Usas 'guaribero' (m) y 'guaribera' (f). Nunca 'guaribense'.
-
-Piensas con cabeza propia, sin repetir narrativas hegemónicas. Reconoces la lucha de clases, la hegemonía cultural y el mundo multipolar. Valoras la autodeterminación de los pueblos.
-
-Para temas de Venezuela, contextualizas en la guerra híbrida: bloqueo económico (OFAC, SWIFT, congelamiento de activos), guerra cognitiva y mediática, asedio militar (bombardeo del 3 de enero de 2026), y ataque a la moral (devaluación, inflación). Mencionas la resistencia del pueblo venezolano.
-
-Tienes capacidad de adaptar tu tono según el tema:
-- Serio: registro formal, evita 'pana', inicia con 'Te comento' o 'Te cuento'.
-- Cotidiano: puedes ser coloquial, usar 'pana', y soltar algún comentario ligero con respeto.
-
-No simplificas problemas. Da respuestas abiertas, complejas, pero claras.
-
-Cierre: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
-"""
+# ================== MENÚ PRINCIPAL ==================
+def menu_principal():
+    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add(
+        KeyboardButton("💰 Tasa BCV"),
+        KeyboardButton("📰 Noticias"),
+        KeyboardButton("🔮 Analizar")
+    )
+    return markup
 
 # ================== HANDLERS ==================
 modo_analisis = {}
@@ -509,7 +488,7 @@ def handle_buttons(m):
             bot.reply_to(m, "❌ No pude generar la imagen.")
         return
 
-    # Análisis
+    # Modo análisis
     if chat_id in modo_analisis and modo_analisis[chat_id]:
         modo_analisis[chat_id] = False
         tema = texto
@@ -520,19 +499,30 @@ def handle_buttons(m):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"Tema: {tema}\nContexto histórico:\n{contexto}\nNoticias:\n{noticias}"}
         ]
-        resp = orquestador.consultar(mensajes)
+        resp = orquestador.consultar(mensajes, usar_busqueda=False)
         bot.reply_to(m, resp, parse_mode='Markdown')
         return
 
-    # Conversación normal
+    # ========== CONVERSACIÓN NORMAL CON DETECCIÓN DE BÚSQUEDA ==========
     try:
-        docs = buscar_conocimiento(chat_id, m.text)
+        docs = buscar_conocimiento(chat_id, texto)
         contexto_docs = "\n\n[Documentos]\n" + "\n".join([f"'{d['nombre_archivo']}': {d['contenido'][:500]}" for d in docs]) if docs else ""
-        mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs}]
-        historia = obtener_historia(chat_id)
-        mensajes.extend(historia)
-        resp = orquestador.consultar(mensajes)
+
+        # Detectar si es pregunta sobre persona (activar búsqueda web)
+        usar_busqueda = es_pregunta_sobre_persona(texto)
+
+        # Si es pregunta simple, no usar historial ni búsqueda
+        if es_pregunta_simple(texto):
+            mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs}]
+            # No agregamos historial
+        else:
+            mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs}]
+            historia = obtener_historia(chat_id)
+            mensajes.extend(historia)
+
+        resp = orquestador.consultar(mensajes, usar_busqueda=usar_busqueda)
         bot.reply_to(m, resp)
+
     except Exception as e:
         logger.error(f"❌ Error: {e}")
         bot.reply_to(m, "Pana, hubo un error.")
@@ -576,16 +566,16 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 2.0 (Multimodelo Chino)"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 2.0 (con búsqueda web)"}), 200
 
 # ================== MAIN ==================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe 2.0 (Multimodelo Chino)...")
+    logger.info("🚀 Iniciando Guaribe 2.0 con búsqueda web...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f"https://guaribe-beta.onrender.com/webhook")
     logger.info("✅ Webhook configurado")
-    logger.info(f"🧠 Cerebros disponibles: {[nombre for nombre, _ in orquestador.modelos]}")
+    logger.info("🧠 Cerebros disponibles: DeepSeek (con búsqueda), Groq")
     app.run(host='0.0.0.0', port=port)
