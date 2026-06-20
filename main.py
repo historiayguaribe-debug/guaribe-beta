@@ -1,6 +1,6 @@
-# ================== PARCHE DE EVENTLET (DEBE IR PRIMERO) ==================
-import eventlet
-eventlet.monkey_patch(thread=True, socket=True, select=True, time=True)
+# ================== PARCHE DE GEVENT (DEBE IR PRIMERO) ==================
+from gevent import monkey
+monkey.patch_all()
 
 # ================== RESTO DE IMPORTACIONES ==================
 import os
@@ -43,57 +43,22 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ================== CONEXIÓN A DB (OPTIMIZADA) ==================
-def get_connection():
-    try:
-        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
-        conn.autocommit = False
-        return conn
-    except Exception as e:
-        logger.error(f"❌ Error DB: {e}")
-        raise
+# ================== CONEXIÓN A DB CON REINTENTOS ==================
+def get_connection(retries=3):
+    for i in range(retries):
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+            conn.autocommit = False
+            return conn
+        except psycopg2.OperationalError as e:
+            if i == retries - 1:
+                raise
+            time.sleep(2 ** i)
+            logger.warning(f"Reintentando conexión DB ({i+1}/{retries})")
 
-# ================== CACHÉ EN BASE DE DATOS ==================
-def init_cache_table():
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS cache (
-                    hash TEXT PRIMARY KEY,
-                    respuesta TEXT NOT NULL,
-                    expira TIMESTAMP NOT NULL
-                )
-            """)
-            conn.commit()
-
-def obtener_cache(consulta_str):
-    h = hashlib.md5(consulta_str.encode()).hexdigest()
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT respuesta FROM cache WHERE hash = %s AND expira > NOW()", (h,))
-            row = cur.fetchone()
-            if row:
-                logger.info("✅ Caché DB hit")
-                return row[0]
-    return None
-
-def guardar_cache(consulta_str, respuesta):
-    h = hashlib.md5(consulta_str.encode()).hexdigest()
-    expira = datetime.datetime.now() + datetime.timedelta(minutes=5)
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO cache (hash, respuesta, expira)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (hash) DO UPDATE SET respuesta = EXCLUDED.respuesta, expira = EXCLUDED.expira
-            """, (h, respuesta, expira))
-            conn.commit()
-
-def limpiar_cache_expirado():
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM cache WHERE expira < NOW()")
-            conn.commit()
+# ================== CACHÉ EN MEMORIA LOCAL ==================
+_cache_noticias = {"data": None, "timestamp": None}
+_cache_tasa = {"data": None, "timestamp": None}
 
 # ================== FUNCIONES DE BASE DE DATOS ==================
 def init_db():
@@ -164,15 +129,14 @@ def init_db():
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_conversaciones_chat_ts ON conversaciones (chat_id, timestamp);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_memoria_larga_chat_ts ON memoria_larga (chat_id, timestamp);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_conocimiento_chat ON conocimiento (chat_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_feedback_chat ON feedback (chat_id);")
-            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_conocimiento_contenido_trgm ON conocimiento USING gin (contenido gin_trgm_ops);")
             conn.commit()
-    init_cache_table()
-    logger.info("✅ Base de datos inicializada con caché")
+    logger.info("✅ Base de datos inicializada")
 
 def guardar_perfil(chat_id, nombre=None, estilo=None, intereses=None, estado_animo=None, preferencia_audio=None):
     with get_connection() as conn:
@@ -288,6 +252,77 @@ def obtener_feedback_relevante(chat_id):
                 return "El usuario ha dado feedback negativo a respuestas similares en el pasado. Evita repetir esos enfoques."
             return ""
 
+def necesita_compresion(chat_id):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(timestamp) FROM memoria_larga WHERE chat_id = %s", (chat_id,))
+            ultima = cur.fetchone()[0]
+            if ultima:
+                cur.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s AND timestamp > %s", (chat_id, ultima))
+                return cur.fetchone()[0] > 30
+            else:
+                cur.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s", (chat_id,))
+                return cur.fetchone()[0] > 50
+
+def comprimir_conversacion(chat_id):
+    if not necesita_compresion(chat_id):
+        return None
+    historia = obtener_historia(chat_id, limite=15)
+    if len(historia) < 4:
+        return None
+    texto_historia = "\n".join([f"{h['role']}: {h['content']}" for h in historia])
+    prompt_compresor = f"""
+    Eres el archivista de Guaribe. Resume la siguiente conversación en una cápsula de memoria.
+    Extrae los temas principales (máximo 3), el tono emocional, y los datos relevantes del usuario.
+    Conversación:
+    {texto_historia}
+    Responde ÚNICAMENTE en formato JSON sin markdown:
+    {{"resumen": "texto conciso de 100 palabras máximo", "temas": ["tema1", "tema2", "tema3"]}}
+    """
+    try:
+        respuesta = orquestador._consultar_deepseek([{"role": "user", "content": prompt_compresor}])
+        json_str = re.sub(r'```json|```', '', respuesta).strip()
+        datos = json.loads(json_str)
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO memoria_larga (chat_id, resumen, temas) VALUES (%s, %s, %s)",
+                    (chat_id, datos['resumen'], datos['temas'])
+                )
+                conn.commit()
+                logger.info(f"🧠 Memoria comprimida para {chat_id}: {datos['temas']}")
+        return datos
+    except Exception as e:
+        logger.error(f"❌ Error comprimiendo memoria: {e}")
+        return None
+
+def comprimir_conversacion_async(chat_id):
+    from gevent import spawn
+    spawn(comprimir_conversacion, chat_id)
+
+def recuperar_memorias_relevantes(chat_id, consulta):
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT resumen, temas FROM memoria_larga WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 20", (chat_id,))
+            registros = cur.fetchall()
+            if not registros:
+                return []
+            texto_memorias = "\n".join([f"- {r['resumen']} (Temas: {', '.join(r['temas'])})" for r in registros])
+            prompt_selector = f"""
+            Dada la consulta del usuario: "{consulta}"
+            Estas son las memorias del usuario:
+            {texto_memorias}
+            Devuelve ÚNICAMENTE los IDs (números de línea) de las memorias que SON RELEVANTES para esta consulta.
+            Si ninguna es relevante, devuelve "NINGUNA".
+            Formato de respuesta: "1, 3, 5"
+            """
+            respuesta = orquestador._consultar_deepseek([{"role": "user", "content": prompt_selector}])
+            if "NINGUNA" in respuesta:
+                return []
+            indices = [int(x.strip()) for x in respuesta.split(',') if x.strip().isdigit()]
+            relevantes = [registros[i-1] for i in indices if 0 < i <= len(registros)]
+            return [r['resumen'] for r in relevantes]
+
 # ================== ORQUESTADOR CON ROTACIÓN DE CLAVES GROQ ==================
 class Orquestador:
     def __init__(self):
@@ -306,7 +341,6 @@ class Orquestador:
             return
         for clave in lista_claves:
             try:
-                # Parche: Forzar http_client=None para evitar error de proxies
                 self.groq_clients.append(Groq(api_key=clave, http_client=None))
                 logger.info(f"✅ Cliente Groq registrado (clave terminada en ...{clave[-4:]})")
             except Exception as e:
@@ -319,12 +353,6 @@ class Orquestador:
             self.modelos.append(("Groq", self._consultar_groq))
 
     def consultar(self, mensajes, usar_busqueda=False, intentos=2):
-        consulta_str = json.dumps(mensajes) + str(usar_busqueda)
-        cacheado = obtener_cache(consulta_str)
-        if cacheado:
-            logger.info("✅ Respuesta desde caché")
-            return cacheado
-
         for nombre, funcion in self.modelos:
             for intento in range(intentos):
                 try:
@@ -334,7 +362,6 @@ class Orquestador:
                         respuesta = funcion(mensajes)
                     if respuesta:
                         self.modelo_activo = nombre
-                        guardar_cache(consulta_str, respuesta)
                         return respuesta
                 except Exception as e:
                     logger.warning(f"⚠️ Intento {intento+1} falló en {nombre}: {e}")
@@ -393,26 +420,19 @@ PROMPT_SIMPLE = """
 Eres Guaribe, asistente venezolano. Hablas como vecino del llano: directo y útil.
 Para preguntas simples (precios, cuentas, saludos), responde de forma breve y concreta.
 No añadas análisis geopolítico ni contexto histórico.
-
 Cierre: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
 """
 
 SYSTEM_PROMPT = """
 Eres Guaribe, asistente venezolano. Hablas como vecino del llano: humilde, directo. Usas 'guaribero' (m) y 'guaribera' (f). Nunca 'guaribense'.
-
 Piensas con cabeza propia, sin repetir narrativas hegemónicas. Reconoces la lucha de clases, la hegemonía cultural y el mundo multipolar. Valoras la autodeterminación de los pueblos.
-
 Para temas de Venezuela, contextualizas en la guerra híbrida: bloqueo económico (OFAC, SWIFT, congelamiento de activos), guerra cognitiva y mediática, asedio militar (bombardeo del 3 de enero de 2026), y ataque a la moral (devaluación, inflación). Mencionas la resistencia del pueblo venezolano.
-
 Tienes capacidad de adaptar tu tono según el tema:
 - Serio: registro formal, evita 'pana', inicia con 'Te comento' o 'Te cuento'.
 - Cotidiano: puedes ser coloquial, usar 'pana', y soltar algún comentario ligero con respeto.
-
 No simplificas problemas. Da respuestas abiertas, complejas, pero claras.
-
 Si el usuario pregunta por una persona, evento o dato que no está en tu conocimiento base, DEBES usar la búsqueda web para encontrar la información correcta.
 Cuando uses búsqueda web, cita la fuente de la información.
-
 Cierre: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
 """
 
@@ -620,10 +640,6 @@ def buscar_contexto(tema):
     r = buscar_en_web(f"historia antecedentes {tema} Venezuela", 3)
     return "\n".join(r) if r else "No se encontraron antecedentes."
 
-# ================== CACHE DE NOTICIAS Y TASAS ==================
-_cache_noticias = {"data": None, "timestamp": None}
-_cache_tasa = {"data": None, "timestamp": None}
-
 def obtener_tasa_cache():
     ahora = datetime.datetime.now()
     if _cache_tasa["timestamp"] and (ahora - _cache_tasa["timestamp"]).seconds < 300:
@@ -637,7 +653,8 @@ def obtener_noticias_cache():
     ahora = datetime.datetime.now()
     if _cache_noticias["timestamp"] and (ahora - _cache_noticias["timestamp"]).seconds < 600:
         return _cache_noticias["data"]
-    eventlet.spawn(actualizar_noticias_background)
+    from gevent import spawn
+    spawn(actualizar_noticias_background)
     return _cache_noticias["data"] if _cache_noticias["data"] else "⏳ Actualizando noticias..."
 
 def actualizar_noticias_background():
@@ -647,13 +664,6 @@ def actualizar_noticias_background():
         _cache_noticias["timestamp"] = datetime.datetime.now()
     except Exception as e:
         logger.error(f"❌ Error actualizando noticias: {e}")
-
-def comprimir_conversacion_async(chat_id):
-    eventlet.spawn(comprimir_conversacion, chat_id)
-
-def comprimir_conversacion(chat_id):
-    # Esta función está definida en el bloque de funciones DB, pero la movemos aquí para claridad
-    pass
 
 # ================== MENÚ PRINCIPAL ==================
 def menu_principal():
@@ -740,6 +750,9 @@ def handle_document(m):
         if ext not in ['.txt', '.pdf', '.docx']:
             bot.reply_to(m, "Solo TXT, PDF o Word.")
             return
+        if m.document.file_size > 5 * 1024 * 1024:
+            bot.reply_to(m, "Archivo demasiado grande (máximo 5MB).")
+            return
         if ext == '.txt':
             texto = data.decode('utf-8', errors='ignore')
         elif ext == '.pdf':
@@ -780,29 +793,22 @@ def generar_hipotesis(chat_id, consulta, memorias, contexto_web=""):
     Eres Guaribe, un analista predictivo con memoria filosófica. 
     Basándote en el historial de conversaciones con {nombre_usuario} y en el contexto actual, 
     genera 3 escenarios posibles a 6, 12 y 24 meses sobre el tema: "{consulta}"
-
     **Memorias relevantes del usuario:**
     {chr(10).join(['- ' + m for m in memorias]) if memorias else 'No hay memorias específicas.'}
-
     **Contexto adicional (noticias, historia):**
     {contexto_web[:1000] if contexto_web else 'Sin contexto externo.'}
-
     **Instrucciones:**
     - Cada escenario debe tener un título y una descripción detallada (mínimo 100 palabras).
     - Incluye factores clave: alianzas internacionales, economía, resistencia popular, tecnología.
     - Sé realista pero atrevido, como un visionario.
     - Termina con una reflexión sobre el rol del usuario en esos escenarios.
-
     Formato de salida:
     **Escenario 1: [título]**
     [descripción]
-    
     **Escenario 2: [título]**
     [descripción]
-    
     **Escenario 3: [título]**
     [descripción]
-    
     **Reflexión final:**
     [texto]
     """
@@ -821,6 +827,10 @@ def handle_buttons(m):
     texto = m.text if hasattr(m, 'text') else ""
     if not texto:
         return
+    if len(texto) > 2000:
+        bot.reply_to(m, "Mensaje demasiado largo (máximo 2000 caracteres).")
+        return
+    logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
 
     texto_lower = texto.lower()
 
@@ -1029,7 +1039,7 @@ def handle_buttons(m):
                 bot.send_voice(chat_id, audio_data, caption="🎙️ Respuesta en audio")
 
     except Exception as e:
-        logger.error(f"❌ Error: {e}")
+        logger.error(f"❌ Error general: {e}")
         bot.reply_to(m, "Pana, hubo un error.")
 
 # ================== SERVIDOR FLASK ==================
@@ -1038,24 +1048,36 @@ app = Flask(__name__)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
+        logger.info("📨 Webhook recibido")
         bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode('utf-8'))])
         return 'ok', 200
     except Exception as e:
-        logger.error(f"❌ Webhook: {e}")
+        logger.error(f"❌ Webhook error: {e}")
         return 'error', 500
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 9.0 Optimizado"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 9.0 Optimizado con Gevent"}), 200
 
 @app.route('/check_reminders', methods=['GET'])
 def check_reminders():
     resultado = revisar_recordatorios()
     return jsonify({"status": "ok", "result": resultado}), 200
 
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    url = f"https://guaribe-beta.onrender.com/webhook"
+    try:
+        bot.remove_webhook()
+        time.sleep(0.5)
+        bot.set_webhook(url=url)
+        return jsonify({"status": "ok", "message": f"Webhook configurado en {url}"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 # ================== EJECUCIÓN ==================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe 9.0 Optimizado (modo desarrollo)...")
+    logger.info("🚀 Iniciando Guaribe 9.0 en modo desarrollo...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
@@ -1064,6 +1086,22 @@ if __name__ == "__main__":
     logger.info("✅ Webhook configurado")
     app.run(host='0.0.0.0', port=port)
 else:
-    logger.info("🚀 Iniciando Guaribe 9.0 Optimizado en Gunicorn...")
+    # Modo producción con Gunicorn y Gevent
+    logger.info("🚀 Iniciando Guaribe 9.0 en modo producción (Gevent)...")
     init_db()
-    logger.info("✅ Webhook configurado previamente")
+    # Configurar webhook automáticamente con reintentos
+    max_retries = 5
+    webhook_url = f"https://guaribe-beta.onrender.com/webhook"
+    for i in range(max_retries):
+        try:
+            bot.remove_webhook()
+            time.sleep(0.5)
+            bot.set_webhook(url=webhook_url)
+            logger.info(f"✅ Webhook configurado en {webhook_url}")
+            break
+        except Exception as e:
+            logger.warning(f"⚠️ Intento {i+1} de configurar webhook falló: {e}")
+            time.sleep(2 ** i)
+    else:
+        logger.error("❌ No se pudo configurar el webhook después de varios intentos.")
+    logger.info("✅ Servidor listo para recibir peticiones")
