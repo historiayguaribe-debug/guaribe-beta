@@ -1,8 +1,6 @@
-# ================== PARCHE DE GEVENT (DEBE IR PRIMERO) ==================
 from gevent import monkey
 monkey.patch_all()
 
-# ================== RESTO DE IMPORTACIONES ==================
 import os
 import time
 import telebot
@@ -28,7 +26,6 @@ from gtts import gTTS
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# ================== CONFIGURACIÓN ==================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -43,7 +40,6 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ================== CONEXIÓN A DB CON REINTENTOS ==================
 def get_connection(retries=3):
     for i in range(retries):
         try:
@@ -56,11 +52,9 @@ def get_connection(retries=3):
             time.sleep(2 ** i)
             logger.warning(f"Reintentando conexión DB ({i+1}/{retries})")
 
-# ================== CACHÉ EN MEMORIA LOCAL ==================
 _cache_noticias = {"data": None, "timestamp": None}
 _cache_tasa = {"data": None, "timestamp": None}
 
-# ================== FUNCIONES DE BASE DE DATOS ==================
 def init_db():
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -323,7 +317,6 @@ def recuperar_memorias_relevantes(chat_id, consulta):
             relevantes = [registros[i-1] for i in indices if 0 < i <= len(registros)]
             return [r['resumen'] for r in relevantes]
 
-# ================== ORQUESTADOR CON ROTACIÓN DE CLAVES GROQ ==================
 class Orquestador:
     def __init__(self):
         self.modelos = []
@@ -415,7 +408,6 @@ class Orquestador:
 
 orquestador = Orquestador()
 
-# ================== PROMPTS ==================
 PROMPT_SIMPLE = """
 Eres Guaribe, asistente venezolano. Hablas como vecino del llano: directo y útil.
 Para preguntas simples (precios, cuentas, saludos), responde de forma breve y concreta.
@@ -454,7 +446,6 @@ INSTRUCCIONES: Analiza el tema desde una perspectiva histórica, identifica patr
 CIERRE: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con orgullo llanero! 🇻🇪🤠🏛️"
 """
 
-# ================== FUNCIONES AUXILIARES ==================
 def es_pregunta_simple(texto):
     texto = texto.lower()
     if texto in ["hola", "buenos días", "buenas", "hey", "qué tal", "como estás"]:
@@ -513,7 +504,6 @@ def detectar_accion(texto):
         return "tasa"
     return None
 
-# ================== FUNCIONES DE IMAGEN, VOZ, CORREO, etc. ==================
 def generar_imagen(prompt, tipo="general"):
     try:
         prompt_limpio = prompt.replace(' ', '%20')
@@ -665,7 +655,6 @@ def actualizar_noticias_background():
     except Exception as e:
         logger.error(f"❌ Error actualizando noticias: {e}")
 
-# ================== MENÚ PRINCIPAL ==================
 def menu_principal():
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
@@ -678,7 +667,6 @@ def menu_principal():
 
 modo_analisis = {}
 
-# ================== HANDLERS ==================
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
     bot.reply_to(m, "¡Epale! Soy **Guaribe**.\n\n"
@@ -820,7 +808,6 @@ def generar_hipotesis(chat_id, consulta, memorias, contexto_web=""):
         logger.error(f"❌ Error generando hipótesis: {e}")
         return "No pude generar hipótesis en este momento."
 
-# ================== HANDLER PRINCIPAL ==================
 @bot.message_handler(func=lambda m: True)
 def handle_buttons(m):
     chat_id = m.chat.id
@@ -1042,7 +1029,6 @@ def handle_buttons(m):
         logger.error(f"❌ Error general: {e}")
         bot.reply_to(m, "Pana, hubo un error.")
 
-# ================== SERVIDOR FLASK ==================
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
@@ -1075,7 +1061,6 @@ def set_webhook():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ================== EJECUCIÓN ==================
 if __name__ == "__main__":
     logger.info("🚀 Iniciando Guaribe 9.0 en modo desarrollo...")
     init_db()
@@ -1086,13 +1071,10 @@ if __name__ == "__main__":
     logger.info("✅ Webhook configurado")
     app.run(host='0.0.0.0', port=port)
 else:
-    # Modo producción con Gunicorn y Gevent
     logger.info("🚀 Iniciando Guaribe 9.0 en modo producción (Gevent)...")
     init_db()
-    # Configurar webhook automáticamente con reintentos
-    max_retries = 5
     webhook_url = f"https://guaribe-beta.onrender.com/webhook"
-    for i in range(max_retries):
+    for i in range(5):
         try:
             bot.remove_webhook()
             time.sleep(0.5)
