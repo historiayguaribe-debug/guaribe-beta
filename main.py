@@ -1,3 +1,8 @@
+# ================== PARCHE DE EVENTLET (DEBE IR PRIMERO) ==================
+import eventlet
+eventlet.monkey_patch()  # Esto debe ejecutarse antes de cualquier otra importación
+
+# ================== RESTO DE IMPORTACIONES ==================
 import os
 import time
 import telebot
