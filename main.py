@@ -39,7 +39,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 # ================== INICIALIZACIÓN DEL BOT ==================
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ================== CACHE EN MEMORIA (local, solo para respuestas rápidas) ==================
+# ================== CACHE EN MEMORIA ==================
 cache_respuestas = {}
 
 def obtener_cache(consulta_str):
@@ -634,7 +634,6 @@ def transcribir_audio(data):
         with open(temp_path, "wb") as f:
             f.write(data)
         with open(temp_path, "rb") as f:
-            # Usamos el primer cliente de Groq para la transcripción
             transcription = orquestador.groq_clients[0].audio.transcriptions.create(
                 file=(temp_path, f.read()),
                 model="whisper-large-v3",
@@ -822,7 +821,6 @@ def handle_document(m):
         if ext not in ['.txt', '.pdf', '.docx']:
             bot.reply_to(m, "Solo TXT, PDF o Word.")
             return
-        # Procesar en memoria sin escribir en disco
         if ext == '.txt':
             texto = data.decode('utf-8', errors='ignore')
         elif ext == '.pdf':
@@ -897,7 +895,7 @@ def generar_hipotesis(chat_id, consulta, memorias, contexto_web=""):
         logger.error(f"❌ Error generando hipótesis: {e}")
         return "No pude generar hipótesis en este momento."
 
-# ================== HANDLER PRINCIPAL (Lenguaje Natural) ==================
+# ================== HANDLER PRINCIPAL ==================
 @bot.message_handler(func=lambda m: True)
 def handle_buttons(m):
     chat_id = m.chat.id
@@ -907,7 +905,7 @@ def handle_buttons(m):
 
     texto_lower = texto.lower()
 
-    # ========== PERFIL Y ESTADO DE ÁNIMO ==========
+    # Perfil y estado de ánimo
     perfil = obtener_perfil(chat_id)
     if not perfil.get('nombre'):
         if "mi nombre es" in texto_lower:
@@ -922,7 +920,7 @@ def handle_buttons(m):
     estado = detectar_estado_animo(texto)
     guardar_perfil(chat_id, estado_animo=estado)
 
-    # ========== DETECCIÓN DE ACCIONES EN LENGUAJE NATURAL ==========
+    # Acciones en lenguaje natural
     accion = detectar_accion(texto)
     
     if accion == "tasa":
@@ -966,8 +964,8 @@ def handle_buttons(m):
             bot.reply_to(m, "📧 Enviando correo...")
             resultado = enviar_correo(destino, asunto, cuerpo)
             bot.reply_to(m, resultado)
-        except Exception as e:
-            bot.reply_to(m, f"❌ No entendí el correo. Usa: 'enviar correo a email@ejemplo.com asunto ...'")
+        except Exception:
+            bot.reply_to(m, "❌ No entendí el correo. Usa: 'enviar correo a email@ejemplo.com asunto ...'")
         return
     
     if accion == "nota":
@@ -1001,7 +999,7 @@ def handle_buttons(m):
             bot.reply_to(m, f"❌ Error: {str(e)[:100]}")
         return
 
-    # ========== CREATIVIDAD E HIPÓTESIS ==========
+    # Creatividad e hipótesis
     tipo_creativo = detectar_tipo_creativo(texto)
     if tipo_creativo:
         if tipo_creativo == "poesia":
@@ -1030,7 +1028,7 @@ def handle_buttons(m):
         bot.reply_to(m, resp)
         return
 
-    # ========== BOTONES ==========
+    # Botones
     if texto == "💰 Tasa BCV":
         bot.reply_to(m, f"{obtener_tasa()}\n\nSoy Guaribe...", parse_mode='Markdown')
         return
@@ -1048,7 +1046,7 @@ def handle_buttons(m):
         bot.reply_to(m, f"🎙️ Preferencia de voz {estado_voz}.")
         return
 
-    # ========== MODO ANÁLISIS ==========
+    # Modo análisis
     if chat_id in modo_analisis and modo_analisis[chat_id]:
         modo_analisis[chat_id] = False
         tema = texto
@@ -1063,7 +1061,7 @@ def handle_buttons(m):
         bot.reply_to(m, resp, parse_mode='Markdown')
         return
 
-    # ========== CONVERSACIÓN NORMAL ==========
+    # Conversación normal
     try:
         comprimir_conversacion(chat_id)
 
@@ -1142,10 +1140,10 @@ def check_reminders():
     resultado = revisar_recordatorios()
     return jsonify({"status": "ok", "result": resultado}), 200
 
-# ================== INICIO (CONDICIONAL PARA GUNICORN) ==================
-# Solo se ejecuta si el script se corre directamente (no con Gunicorn)
+# ================== EJECUCIÓN ==================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe 9.0 Unificado (modo desarrollo)...")
+    # Modo desarrollo (solo cuando se ejecuta directamente)
+    logger.info("🚀 Iniciando Guaribe 9.0 en modo desarrollo...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
@@ -1156,10 +1154,9 @@ if __name__ == "__main__":
     logger.info(f"⚡ Claves Groq activas: {len(orquestador.groq_clients)}")
     app.run(host='0.0.0.0', port=port)
 else:
-    # Cuando Gunicorn importa la app, no ejecuta el bloque superior, pero necesitamos inicializar la DB y el webhook
-    # Se ejecutará una sola vez al arrancar el worker.
-    logger.info("🚀 Iniciando Guaribe 9.0 Unificado en modo Gunicorn...")
+    # Modo producción (Gunicorn importa la app)
+    logger.info("🚀 Iniciando Guaribe 9.0 en modo producción (Gunicorn)...")
     init_db()
-    # El webhook se configura una sola vez. Render garantiza que esto se ejecute al inicio.
-    # Si ya está configurado, no es necesario repetirlo.
-    logger.info("✅ Webhook ya configurado (o configurable manualmente)")
+    logger.info("✅ Webhook configurado previamente")
+    logger.info(f"🧠 Cerebros disponibles: {len(orquestador.modelos)} motores")
+    logger.info(f"⚡ Claves Groq activas: {len(orquestador.groq_clients)}")
