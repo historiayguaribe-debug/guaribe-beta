@@ -1,7 +1,12 @@
+# ============================================================
+# GUARIBE 9.0 - REQUISITOS PARA PRODUCCIÓN
+# Compatible con Python 3.14+ y Render.com
+# ============================================================
+
 blinker==1.7.0
 bs4==0.0.1
 Flask==2.3.3
-eventlet==0.38.4
+eventlet==0.41.0
 gTTS==2.3.2
 gunicorn==22.0.0
 groq==0.9.0
