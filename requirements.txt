@@ -1,7 +1,7 @@
 blinker==1.7.0
 bs4==0.0.1
 Flask==2.3.3
-eventlet==0.41.0
+gevent==25.9.1
 gTTS==2.3.2
 gunicorn==22.0.0
 groq==1.0.0
