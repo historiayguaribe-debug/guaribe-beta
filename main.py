@@ -15,6 +15,7 @@ import re
 import smtplib
 import datetime
 import hashlib
+import threading
 from flask import Flask, request, jsonify
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from bs4 import BeautifulSoup
@@ -808,6 +809,9 @@ def generar_hipotesis(chat_id, consulta, memorias, contexto_web=""):
         logger.error(f"❌ Error generando hipótesis: {e}")
         return "No pude generar hipótesis en este momento."
 
+# ===========================
+# HANDLER PRINCIPAL (MODIFICADO)
+# ===========================
 @bot.message_handler(func=lambda m: True)
 def handle_buttons(m):
     chat_id = m.chat.id
@@ -817,229 +821,273 @@ def handle_buttons(m):
     if len(texto) > 2000:
         bot.reply_to(m, "Mensaje demasiado largo (máximo 2000 caracteres).")
         return
-    logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
 
-    texto_lower = texto.lower()
+    # LOG DE ENTRADA
+    logger.info(f"✅ Handler genérico ejecutado para {chat_id}: {texto[:50]}...")
 
-    perfil = obtener_perfil(chat_id)
-    if not perfil.get('nombre'):
-        if "mi nombre es" in texto_lower:
-            partes = texto.split("mi nombre es")
-            if len(partes) > 1:
-                nombre_detectado = partes[1].strip().split()[0]
-                guardar_perfil(chat_id, nombre=nombre_detectado)
-                perfil = obtener_perfil(chat_id)
-                bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
-                return
-
-    estado = detectar_estado_animo(texto)
-    guardar_perfil(chat_id, estado_animo=estado)
-
-    accion = detectar_accion(texto)
-    
-    if accion == "tasa":
-        bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
-        return
-    
-    if accion == "noticias":
-        bot.reply_to(m, f"{obtener_noticias_cache()}\n\nSoy Guaribe...")
-        return
-    
-    if accion == "imagen":
-        tipo = "infografia" if any(p in texto_lower for p in ["infografía", "infografia"]) else "logo" if "logo" in texto_lower else "general"
-        prompt = texto
-        for p in ["crea", "genera", "dibuja", "haz", "quiero", "imagen", "dibujo", "foto", "infografía", "logo"]:
-            prompt = prompt.replace(p, "").strip()
-        prompt = prompt.replace("de", "").replace("una", "").replace("un", "").strip()
-        if not prompt:
-            prompt = texto
-        bot.reply_to(m, "🎨 Generando imagen...")
-        img = generar_imagen(prompt, tipo)
-        if img:
-            bot.send_photo(chat_id, img, caption=f"🎨 *{prompt}*\n\nSoy Guaribe...", parse_mode='Markdown')
-        else:
-            bot.reply_to(m, "❌ No pude generar la imagen.")
-        return
-    
-    if accion == "email":
-        try:
-            partes = texto.split("a ")[1] if "a " in texto else None
-            if not partes:
-                bot.reply_to(m, "📧 Para enviar un correo, dime: 'enviar correo a correo@ejemplo.com asunto ...'")
-                return
-            destino = partes.split(" ")[0]
-            resto = " ".join(partes.split(" ")[1:])
-            if " asunto " in resto:
-                asunto = resto.split(" asunto ")[1].split(" cuerpo ")[0] if " cuerpo " in resto else resto.split(" asunto ")[1]
-                cuerpo = resto.split(" cuerpo ")[1] if " cuerpo " in resto else ""
-            else:
-                asunto = "Mensaje desde Guaribe"
-                cuerpo = resto
-            bot.reply_to(m, "📧 Enviando correo...")
-            resultado = enviar_correo(destino, asunto, cuerpo)
-            bot.reply_to(m, resultado)
-        except Exception:
-            bot.reply_to(m, "❌ No entendí el correo. Usa: 'enviar correo a email@ejemplo.com asunto ...'")
-        return
-    
-    if accion == "nota":
-        texto_nota = texto
-        for p in ["guardar nota", "nota:", "apunta esto"]:
-            texto_nota = texto_nota.replace(p, "").strip()
-        if not texto_nota:
-            bot.reply_to(m, "📝 Escribe algo para guardar: 'guarda nota: ...'")
-            return
-        resultado = guardar_nota(chat_id, texto_nota)
-        bot.reply_to(m, resultado)
-        return
-    
-    if accion == "recordatorio":
-        try:
-            partes = texto.split(" para el ")
-            if len(partes) < 2:
-                bot.reply_to(m, "⏰ Usa: 'recordatorio ... para el YYYY-MM-DD HH:MM'")
-                return
-            texto_rec = partes[0].replace("recordatorio", "").replace("recuérdame", "").replace("recordar", "").strip()
-            fecha_str = partes[1].strip()
-            fecha_hora = datetime.datetime.strptime(fecha_str, "%Y-%m-%d %H:%M")
-            if fecha_hora < datetime.datetime.now():
-                bot.reply_to(m, "⚠️ La fecha debe ser futura.")
-                return
-            resultado = guardar_recordatorio(chat_id, texto_rec, fecha_hora)
-            bot.reply_to(m, resultado)
-        except ValueError:
-            bot.reply_to(m, "❌ Formato de fecha inválido. Usa: YYYY-MM-DD HH:MM")
-        except Exception as e:
-            bot.reply_to(m, f"❌ Error: {str(e)[:100]}")
-        return
-
-    tipo_creativo = detectar_tipo_creativo(texto)
-    if tipo_creativo:
-        if tipo_creativo == "poesia":
-            prompt_activo = PROMPT_POESIA
-        elif tipo_creativo == "manifiesto":
-            prompt_activo = PROMPT_MANIFIESTO
-        elif tipo_creativo == "prediccion":
-            tema = texto
-            for p in ["predice", "proyección", "qué pasará", "escenario", "futuro de", "hipótesis", "hipotesis"]:
-                tema = tema.replace(p, "").strip()
-            if not tema:
-                tema = "el futuro de Venezuela"
-            memorias = recuperar_memorias_relevantes(chat_id, tema)
-            contexto_web = buscar_contexto(tema)
-            bot.reply_to(m, "🔮 Generando hipótesis...")
-            respuesta = generar_hipotesis(chat_id, tema, memorias, contexto_web)
-            bot.reply_to(m, respuesta, parse_mode='Markdown')
-            return
-        else:
-            prompt_activo = SYSTEM_PROMPT
-
-        mensajes = [{"role": "system", "content": prompt_activo}]
-        historia = obtener_historia(chat_id)
-        mensajes.extend(historia)
-        resp = orquestador.consultar(mensajes)
-        bot.reply_to(m, resp)
-        return
-
-    if texto == "💰 Tasa BCV":
-        bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
-        return
-    if texto == "📰 Noticias":
-        bot.reply_to(m, f"{obtener_noticias_cache()}\n\nSoy Guaribe...")
-        return
-    if texto == "🔮 Analizar":
-        modo_analisis[chat_id] = True
-        bot.reply_to(m, "🔮 Envíame el tema a analizar.")
-        return
-    if texto == "🎙️ Activar/Desactivar Voz":
-        nueva_pref = not perfil.get('preferencia_audio', False)
-        guardar_perfil(chat_id, preferencia_audio=nueva_pref)
-        estado_voz = "activada" if nueva_pref else "desactivada"
-        bot.reply_to(m, f"🎙️ Preferencia de voz {estado_voz}.")
-        return
-
-    if chat_id in modo_analisis and modo_analisis[chat_id]:
-        modo_analisis[chat_id] = False
-        tema = texto
-        bot.reply_to(m, f"📊 Analizando: {tema[:50]}...")
-        contexto = buscar_contexto(tema)
-        noticias = obtener_noticias_cache()
-        mensajes = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Tema: {tema}\nContexto histórico:\n{contexto}\nNoticias:\n{noticias}"}
-        ]
-        resp = orquestador.consultar(mensajes, usar_busqueda=False)
-        bot.reply_to(m, resp, parse_mode='Markdown')
-        return
-
+    # Envolvemos todo en try/except para capturar errores y no dejar al usuario sin respuesta
     try:
-        comprimir_conversacion_async(chat_id)
+        texto_lower = texto.lower()
+        perfil = obtener_perfil(chat_id)
 
-        memorias = recuperar_memorias_relevantes(chat_id, texto)
-        contexto_memorias = ""
-        if memorias:
-            contexto_memorias = "\n[Recuerdos de Guaribe sobre ti]:\n" + "\n".join([f"- {m}" for m in memorias])
-            logger.info(f"🧠 Inyectando {len(memorias)} memorias")
+        # Detectar nombre
+        if not perfil.get('nombre'):
+            if "mi nombre es" in texto_lower:
+                partes = texto.split("mi nombre es")
+                if len(partes) > 1:
+                    nombre_detectado = partes[1].strip().split()[0]
+                    guardar_perfil(chat_id, nombre=nombre_detectado)
+                    perfil = obtener_perfil(chat_id)
+                    bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
+                    return
 
-        docs = buscar_conocimiento(chat_id, texto)
-        contexto_docs = ""
-        if docs:
-            contexto_docs = "\n\n[Documentos]\n" + "\n".join([f"'{d['nombre_archivo']}': {d['contenido'][:500]}" for d in docs])
+        # Detectar estado de ánimo
+        estado = detectar_estado_animo(texto)
+        guardar_perfil(chat_id, estado_animo=estado)
 
-        contexto_personalidad = ""
-        if perfil.get('nombre'):
-            contexto_personalidad += f"El usuario se llama {perfil['nombre']}. "
-        if perfil.get('estilo') == 'poetico':
-            contexto_personalidad += "Prefiere un tono poético y reflexivo. "
-        elif perfil.get('estilo') == 'directo':
-            contexto_personalidad += "Prefiere respuestas directas y sin rodeos. "
-        if perfil.get('estado_animo'):
-            contexto_personalidad += f"Su estado de ánimo actual es: {perfil['estado_animo']}. Adáptate a su estado."
+        # Detectar acción rápida (no requieren IA pesada)
+        accion = detectar_accion(texto)
 
-        feedback_neg = obtener_feedback_relevante(chat_id)
-        if feedback_neg:
-            contexto_personalidad += "\n" + feedback_neg
+        # ---- ACCIONES RÁPIDAS (respondemos inmediatamente) ----
+        if accion == "tasa":
+            bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
+            return
 
-        usar_busqueda = es_pregunta_sobre_persona(texto)
+        if accion == "noticias":
+            bot.reply_to(m, f"{obtener_noticias_cache()}\n\nSoy Guaribe...")
+            return
 
-        if es_pregunta_simple(texto):
-            mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
+        if accion == "imagen":
+            tipo = "infografia" if any(p in texto_lower for p in ["infografía", "infografia"]) else "logo" if "logo" in texto_lower else "general"
+            prompt = texto
+            for p in ["crea", "genera", "dibuja", "haz", "quiero", "imagen", "dibujo", "foto", "infografía", "logo"]:
+                prompt = prompt.replace(p, "").strip()
+            prompt = prompt.replace("de", "").replace("una", "").replace("un", "").strip()
+            if not prompt:
+                prompt = texto
+            bot.reply_to(m, "🎨 Generando imagen...")
+            img = generar_imagen(prompt, tipo)
+            if img:
+                bot.send_photo(chat_id, img, caption=f"🎨 *{prompt}*\n\nSoy Guaribe...", parse_mode='Markdown')
+            else:
+                bot.reply_to(m, "❌ No pude generar la imagen.")
+            return
+
+        if accion == "email":
+            try:
+                partes = texto.split("a ")[1] if "a " in texto else None
+                if not partes:
+                    bot.reply_to(m, "📧 Para enviar un correo, dime: 'enviar correo a correo@ejemplo.com asunto ...'")
+                    return
+                destino = partes.split(" ")[0]
+                resto = " ".join(partes.split(" ")[1:])
+                if " asunto " in resto:
+                    asunto = resto.split(" asunto ")[1].split(" cuerpo ")[0] if " cuerpo " in resto else resto.split(" asunto ")[1]
+                    cuerpo = resto.split(" cuerpo ")[1] if " cuerpo " in resto else ""
+                else:
+                    asunto = "Mensaje desde Guaribe"
+                    cuerpo = resto
+                bot.reply_to(m, "📧 Enviando correo...")
+                resultado = enviar_correo(destino, asunto, cuerpo)
+                bot.reply_to(m, resultado)
+            except Exception:
+                bot.reply_to(m, "❌ No entendí el correo. Usa: 'enviar correo a email@ejemplo.com asunto ...'")
+            return
+
+        if accion == "nota":
+            texto_nota = texto
+            for p in ["guardar nota", "nota:", "apunta esto"]:
+                texto_nota = texto_nota.replace(p, "").strip()
+            if not texto_nota:
+                bot.reply_to(m, "📝 Escribe algo para guardar: 'guarda nota: ...'")
+                return
+            resultado = guardar_nota(chat_id, texto_nota)
+            bot.reply_to(m, resultado)
+            return
+
+        if accion == "recordatorio":
+            try:
+                partes = texto.split(" para el ")
+                if len(partes) < 2:
+                    bot.reply_to(m, "⏰ Usa: 'recordatorio ... para el YYYY-MM-DD HH:MM'")
+                    return
+                texto_rec = partes[0].replace("recordatorio", "").replace("recuérdame", "").replace("recordar", "").strip()
+                fecha_str = partes[1].strip()
+                fecha_hora = datetime.datetime.strptime(fecha_str, "%Y-%m-%d %H:%M")
+                if fecha_hora < datetime.datetime.now():
+                    bot.reply_to(m, "⚠️ La fecha debe ser futura.")
+                    return
+                resultado = guardar_recordatorio(chat_id, texto_rec, fecha_hora)
+                bot.reply_to(m, resultado)
+            except ValueError:
+                bot.reply_to(m, "❌ Formato de fecha inválido. Usa: YYYY-MM-DD HH:MM")
+            except Exception as e:
+                bot.reply_to(m, f"❌ Error: {str(e)[:100]}")
+            return
+
+        # Botones especiales (tasa, noticias, analizar, voz)
+        if texto == "💰 Tasa BCV":
+            bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
+            return
+        if texto == "📰 Noticias":
+            bot.reply_to(m, f"{obtener_noticias_cache()}\n\nSoy Guaribe...")
+            return
+        if texto == "🔮 Analizar":
+            modo_analisis[chat_id] = True
+            bot.reply_to(m, "🔮 Envíame el tema a analizar.")
+            return
+        if texto == "🎙️ Activar/Desactivar Voz":
+            nueva_pref = not perfil.get('preferencia_audio', False)
+            guardar_perfil(chat_id, preferencia_audio=nueva_pref)
+            estado_voz = "activada" if nueva_pref else "desactivada"
+            bot.reply_to(m, f"🎙️ Preferencia de voz {estado_voz}.")
+            return
+
+        # Modo análisis (activado por botón)
+        if chat_id in modo_analisis and modo_analisis[chat_id]:
+            modo_analisis[chat_id] = False
+            tema = texto
+            bot.reply_to(m, f"📊 Analizando: {tema[:50]}...")
+            contexto = buscar_contexto(tema)
+            noticias = obtener_noticias_cache()
+            mensajes = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Tema: {tema}\nContexto histórico:\n{contexto}\nNoticias:\n{noticias}"}
+            ]
             resp = orquestador.consultar(mensajes, usar_busqueda=False)
-        else:
-            mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
+            bot.reply_to(m, resp, parse_mode='Markdown')
+            return
+
+        # ---- TIPO CREATIVO (poesía, manifiesto, predicción) ----
+        tipo_creativo = detectar_tipo_creativo(texto)
+        if tipo_creativo:
+            if tipo_creativo == "poesia":
+                prompt_activo = PROMPT_POESIA
+            elif tipo_creativo == "manifiesto":
+                prompt_activo = PROMPT_MANIFIESTO
+            elif tipo_creativo == "prediccion":
+                tema = texto
+                for p in ["predice", "proyección", "qué pasará", "escenario", "futuro de", "hipótesis", "hipotesis"]:
+                    tema = tema.replace(p, "").strip()
+                if not tema:
+                    tema = "el futuro de Venezuela"
+                memorias = recuperar_memorias_relevantes(chat_id, tema)
+                contexto_web = buscar_contexto(tema)
+                bot.reply_to(m, "🔮 Generando hipótesis...")
+                respuesta = generar_hipotesis(chat_id, tema, memorias, contexto_web)
+                bot.reply_to(m, respuesta, parse_mode='Markdown')
+                return
+            else:
+                prompt_activo = SYSTEM_PROMPT
+
+            mensajes = [{"role": "system", "content": prompt_activo}]
             historia = obtener_historia(chat_id)
             mensajes.extend(historia)
-            resp = orquestador.consultar(mensajes, usar_busqueda=usar_busqueda)
+            resp = orquestador.consultar(mensajes)
+            bot.reply_to(m, resp)
+            return
 
-        sent_msg = bot.reply_to(m, resp)
+        # ---- CONSULTA GENERAL (PESADA) ----
+        # Enviamos una respuesta inmediata para evitar timeout de Telegram
+        bot.reply_to(m, "⏳ Procesando tu solicitud...")
 
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("👍", callback_data=f"fb_{sent_msg.message_id}_1"),
-            InlineKeyboardButton("👎", callback_data=f"fb_{sent_msg.message_id}_-1")
-        )
-        bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
+        # Ejecutamos la lógica pesada en un hilo separado
+        def tarea_pesada():
+            try:
+                # Compresión de memoria (async)
+                comprimir_conversacion_async(chat_id)
 
-        if perfil.get('preferencia_audio', False):
-            audio_data = generar_audio(resp)
-            if audio_data:
-                bot.send_voice(chat_id, audio_data, caption="🎙️ Respuesta en audio")
+                # Recuperar memorias
+                memorias = recuperar_memorias_relevantes(chat_id, texto)
+                contexto_memorias = ""
+                if memorias:
+                    contexto_memorias = "\n[Recuerdos de Guaribe sobre ti]:\n" + "\n".join([f"- {m}" for m in memorias])
+                    logger.info(f"🧠 Inyectando {len(memorias)} memorias")
+
+                docs = buscar_conocimiento(chat_id, texto)
+                contexto_docs = ""
+                if docs:
+                    contexto_docs = "\n\n[Documentos]\n" + "\n".join([f"'{d['nombre_archivo']}': {d['contenido'][:500]}" for d in docs])
+
+                contexto_personalidad = ""
+                if perfil.get('nombre'):
+                    contexto_personalidad += f"El usuario se llama {perfil['nombre']}. "
+                if perfil.get('estilo') == 'poetico':
+                    contexto_personalidad += "Prefiere un tono poético y reflexivo. "
+                elif perfil.get('estilo') == 'directo':
+                    contexto_personalidad += "Prefiere respuestas directas y sin rodeos. "
+                if perfil.get('estado_animo'):
+                    contexto_personalidad += f"Su estado de ánimo actual es: {perfil['estado_animo']}. Adáptate a su estado."
+
+                feedback_neg = obtener_feedback_relevante(chat_id)
+                if feedback_neg:
+                    contexto_personalidad += "\n" + feedback_neg
+
+                usar_busqueda = es_pregunta_sobre_persona(texto)
+
+                if es_pregunta_simple(texto):
+                    mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
+                    resp = orquestador.consultar(mensajes, usar_busqueda=False)
+                else:
+                    mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
+                    historia = obtener_historia(chat_id)
+                    mensajes.extend(historia)
+                    resp = orquestador.consultar(mensajes, usar_busqueda=usar_busqueda)
+
+                # Enviar respuesta final
+                sent_msg = bot.send_message(chat_id, resp)
+
+                # Añadir botones de feedback
+                markup = InlineKeyboardMarkup()
+                markup.add(
+                    InlineKeyboardButton("👍", callback_data=f"fb_{sent_msg.message_id}_1"),
+                    InlineKeyboardButton("👎", callback_data=f"fb_{sent_msg.message_id}_-1")
+                )
+                bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
+
+                # Audio si está activado
+                if perfil.get('preferencia_audio', False):
+                    audio_data = generar_audio(resp)
+                    if audio_data:
+                        bot.send_voice(chat_id, audio_data, caption="🎙️ Respuesta en audio")
+
+                logger.info(f"✅ Tarea pesada completada para {chat_id}")
+
+            except Exception as e:
+                logger.error(f"❌ Error en tarea pesada para {chat_id}: {e}", exc_info=True)
+                try:
+                    bot.send_message(chat_id, "Ocurrió un error procesando tu solicitud. Intenta más tarde.")
+                except:
+                    pass
+
+        threading.Thread(target=tarea_pesada).start()
 
     except Exception as e:
-        logger.error(f"❌ Error general: {e}")
-        bot.reply_to(m, "Pana, hubo un error.")
+        logger.error(f"❌ Error general en handle_buttons para {chat_id}: {e}", exc_info=True)
+        try:
+            bot.reply_to(m, "Pana, hubo un error. Intenta de nuevo.")
+        except:
+            pass
 
+# ===========================
+# APLICACIÓN FLASK
+# ===========================
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        logger.info("📨 Webhook recibido")
-        bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode('utf-8'))])
+        json_str = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_str)
+        logger.info(f"📨 Webhook recibido (update_id: {update.update_id})")
+        # Log del mensaje si existe
+        if update.message and update.message.text:
+            logger.info(f"📩 Mensaje de {update.message.chat.id}: {update.message.text[:50]}...")
+        bot.process_new_updates([update])
         return 'ok', 200
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
-        return 'error', 500
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        return 'ok', 200  # Siempre 200 para evitar reintentos
 
 @app.route('/')
 def home():
@@ -1061,6 +1109,9 @@ def set_webhook():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ===========================
+# CONFIGURACIÓN DEL WEBHOOK (UNA SOLA VEZ)
+# ===========================
 if __name__ == "__main__":
     logger.info("🚀 Iniciando Guaribe 9.0 en modo desarrollo...")
     init_db()
@@ -1071,19 +1122,26 @@ if __name__ == "__main__":
     logger.info("✅ Webhook configurado")
     app.run(host='0.0.0.0', port=port)
 else:
-    logger.info("🚀 Iniciando Guaribe 9.0 en modo producción (Gevent)...")
-    init_db()
-    webhook_url = f"https://guaribe-beta.onrender.com/webhook"
-    for i in range(5):
-        try:
-            bot.remove_webhook()
-            time.sleep(0.5)
-            bot.set_webhook(url=webhook_url)
-            logger.info(f"✅ Webhook configurado en {webhook_url}")
-            break
-        except Exception as e:
-            logger.warning(f"⚠️ Intento {i+1} de configurar webhook falló: {e}")
-            time.sleep(2 ** i)
+    # Modo producción (Gunicorn)
+    # Esta sección se ejecuta cuando el módulo es importado por Gunicorn
+    # Para evitar configurar el webhook múltiples veces, usamos una variable de entorno
+    if os.environ.get('WEBHOOK_SET') != 'true':
+        logger.info("🚀 Iniciando Guaribe 9.0 en modo producción (Gevent)...")
+        init_db()
+        webhook_url = f"https://guaribe-beta.onrender.com/webhook"
+        for i in range(5):
+            try:
+                bot.remove_webhook()
+                time.sleep(0.5)
+                bot.set_webhook(url=webhook_url)
+                logger.info(f"✅ Webhook configurado en {webhook_url}")
+                os.environ['WEBHOOK_SET'] = 'true'  # Marcar como configurado
+                break
+            except Exception as e:
+                logger.warning(f"⚠️ Intento {i+1} de configurar webhook falló: {e}")
+                time.sleep(2 ** i)
+        else:
+            logger.error("❌ No se pudo configurar el webhook después de varios intentos.")
+        logger.info("✅ Servidor listo para recibir peticiones")
     else:
-        logger.error("❌ No se pudo configurar el webhook después de varios intentos.")
-    logger.info("✅ Servidor listo para recibir peticiones")
+        logger.info("🔁 Webhook ya configurado, evitando duplicados.")
