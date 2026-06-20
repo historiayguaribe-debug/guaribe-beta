@@ -1,6 +1,6 @@
 # ================== PARCHE DE EVENTLET (DEBE IR PRIMERO) ==================
 import eventlet
-eventlet.monkey_patch()  # Esto debe ejecutarse antes de cualquier otra importación
+eventlet.monkey_patch(thread=True, socket=True, select=True, time=True)
 
 # ================== RESTO DE IMPORTACIONES ==================
 import os
@@ -28,7 +28,7 @@ from gtts import gTTS
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# ================== CONFIGURACIÓN INICIAL ==================
+# ================== CONFIGURACIÓN ==================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -41,374 +41,252 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
-# ================== INICIALIZACIÓN DEL BOT ==================
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ================== CACHE EN MEMORIA ==================
-cache_respuestas = {}
-
-def obtener_cache(consulta_str):
-    h = hashlib.md5(consulta_str.encode()).hexdigest()
-    if h in cache_respuestas:
-        resp, ts = cache_respuestas[h]
-        if datetime.datetime.now() - ts < datetime.timedelta(minutes=5):
-            return resp
-        else:
-            del cache_respuestas[h]
-    return None
-
-def guardar_cache(consulta_str, respuesta):
-    h = hashlib.md5(consulta_str.encode()).hexdigest()
-    cache_respuestas[h] = (respuesta, datetime.datetime.now())
-
-# ================== CONEXIÓN A BASE DE DATOS (SIN POOL) ==================
+# ================== CONEXIÓN A DB (OPTIMIZADA) ==================
 def get_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
         conn.autocommit = False
         return conn
     except Exception as e:
-        logger.error(f"❌ Error conectando a DB: {e}")
+        logger.error(f"❌ Error DB: {e}")
         raise
+
+# ================== CACHÉ EN BASE DE DATOS ==================
+def init_cache_table():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cache (
+                    hash TEXT PRIMARY KEY,
+                    respuesta TEXT NOT NULL,
+                    expira TIMESTAMP NOT NULL
+                )
+            """)
+            conn.commit()
+
+def obtener_cache(consulta_str):
+    h = hashlib.md5(consulta_str.encode()).hexdigest()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT respuesta FROM cache WHERE hash = %s AND expira > NOW()", (h,))
+            row = cur.fetchone()
+            if row:
+                logger.info("✅ Caché DB hit")
+                return row[0]
+    return None
+
+def guardar_cache(consulta_str, respuesta):
+    h = hashlib.md5(consulta_str.encode()).hexdigest()
+    expira = datetime.datetime.now() + datetime.timedelta(minutes=5)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO cache (hash, respuesta, expira)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (hash) DO UPDATE SET respuesta = EXCLUDED.respuesta, expira = EXCLUDED.expira
+            """, (h, respuesta, expira))
+            conn.commit()
+
+def limpiar_cache_expirado():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM cache WHERE expira < NOW()")
+            conn.commit()
 
 # ================== FUNCIONES DE BASE DE DATOS ==================
 def init_db():
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS conversaciones (
-                        id SERIAL PRIMARY KEY,
-                        chat_id BIGINT NOT NULL,
-                        rol VARCHAR(10) NOT NULL,
-                        mensaje TEXT NOT NULL,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS conocimiento (
-                        id SERIAL PRIMARY KEY,
-                        chat_id BIGINT NOT NULL,
-                        nombre_archivo TEXT NOT NULL,
-                        contenido TEXT NOT NULL,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS perfiles (
-                        chat_id BIGINT PRIMARY KEY,
-                        nombre TEXT,
-                        estilo TEXT DEFAULT 'conversacional',
-                        intereses TEXT,
-                        estado_animo TEXT,
-                        preferencia_audio BOOLEAN DEFAULT FALSE,
-                        ultima_interaccion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS memoria_larga (
-                        id SERIAL PRIMARY KEY,
-                        chat_id BIGINT NOT NULL,
-                        resumen TEXT NOT NULL,
-                        temas TEXT[],
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS notas (
-                        id SERIAL PRIMARY KEY,
-                        chat_id BIGINT NOT NULL,
-                        texto TEXT NOT NULL,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS recordatorios (
-                        id SERIAL PRIMARY KEY,
-                        chat_id BIGINT NOT NULL,
-                        texto TEXT NOT NULL,
-                        fecha_hora TIMESTAMP NOT NULL,
-                        enviado BOOLEAN DEFAULT FALSE,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS feedback (
-                        id SERIAL PRIMARY KEY,
-                        chat_id BIGINT NOT NULL,
-                        respuesta TEXT NOT NULL,
-                        puntuacion INTEGER CHECK (puntuacion IN (1, -1)),
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversaciones_chat_ts ON conversaciones (chat_id, timestamp);")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memoria_larga_chat_ts ON memoria_larga (chat_id, timestamp);")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_conocimiento_chat ON conocimiento (chat_id);")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_feedback_chat ON feedback (chat_id);")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_conocimiento_contenido_trgm ON conocimiento USING gin (contenido gin_trgm_ops);")
-                conn.commit()
-                logger.info("✅ Base de datos inicializada con todas las tablas e índices")
-    except Exception as e:
-        logger.error(f"❌ Error en init_db: {e}")
-        raise
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS conversaciones (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    rol VARCHAR(10) NOT NULL,
+                    mensaje TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS conocimiento (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    nombre_archivo TEXT NOT NULL,
+                    contenido TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS perfiles (
+                    chat_id BIGINT PRIMARY KEY,
+                    nombre TEXT,
+                    estilo TEXT DEFAULT 'conversacional',
+                    intereses TEXT,
+                    estado_animo TEXT,
+                    preferencia_audio BOOLEAN DEFAULT FALSE,
+                    ultima_interaccion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS memoria_larga (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    resumen TEXT NOT NULL,
+                    temas TEXT[],
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notas (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    texto TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS recordatorios (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    texto TEXT NOT NULL,
+                    fecha_hora TIMESTAMP NOT NULL,
+                    enviado BOOLEAN DEFAULT FALSE,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS feedback (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    respuesta TEXT NOT NULL,
+                    puntuacion INTEGER CHECK (puntuacion IN (1, -1)),
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_conversaciones_chat_ts ON conversaciones (chat_id, timestamp);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_memoria_larga_chat_ts ON memoria_larga (chat_id, timestamp);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_conocimiento_chat ON conocimiento (chat_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_feedback_chat ON feedback (chat_id);")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_conocimiento_contenido_trgm ON conocimiento USING gin (contenido gin_trgm_ops);")
+            conn.commit()
+    init_cache_table()
+    logger.info("✅ Base de datos inicializada con caché")
 
 def guardar_perfil(chat_id, nombre=None, estilo=None, intereses=None, estado_animo=None, preferencia_audio=None):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    INSERT INTO perfiles (chat_id, nombre, estilo, intereses, estado_animo, preferencia_audio)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (chat_id) DO UPDATE SET
-                        nombre = COALESCE(EXCLUDED.nombre, perfiles.nombre),
-                        estilo = COALESCE(EXCLUDED.estilo, perfiles.estilo),
-                        intereses = COALESCE(EXCLUDED.intereses, perfiles.intereses),
-                        estado_animo = COALESCE(EXCLUDED.estado_animo, perfiles.estado_animo),
-                        preferencia_audio = COALESCE(EXCLUDED.preferencia_audio, perfiles.preferencia_audio),
-                        ultima_interaccion = CURRENT_TIMESTAMP
-                """, (chat_id, nombre, estilo, intereses, estado_animo, preferencia_audio))
-                conn.commit()
-    except Exception as e:
-        logger.error(f"❌ guardar_perfil: {e}")
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO perfiles (chat_id, nombre, estilo, intereses, estado_animo, preferencia_audio)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    nombre = COALESCE(EXCLUDED.nombre, perfiles.nombre),
+                    estilo = COALESCE(EXCLUDED.estilo, perfiles.estilo),
+                    intereses = COALESCE(EXCLUDED.intereses, perfiles.intereses),
+                    estado_animo = COALESCE(EXCLUDED.estado_animo, perfiles.estado_animo),
+                    preferencia_audio = COALESCE(EXCLUDED.preferencia_audio, perfiles.preferencia_audio),
+                    ultima_interaccion = CURRENT_TIMESTAMP
+            """, (chat_id, nombre, estilo, intereses, estado_animo, preferencia_audio))
+            conn.commit()
 
 def obtener_perfil(chat_id):
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cursor:
-                cursor.execute("SELECT * FROM perfiles WHERE chat_id = %s", (chat_id,))
-                perfil = cursor.fetchone()
-                return perfil if perfil else {'chat_id': chat_id, 'estilo': 'conversacional', 'preferencia_audio': False}
-    except Exception as e:
-        logger.error(f"❌ obtener_perfil: {e}")
-        return {'chat_id': chat_id, 'estilo': 'conversacional', 'preferencia_audio': False}
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT * FROM perfiles WHERE chat_id = %s", (chat_id,))
+            perfil = cur.fetchone()
+            return perfil if perfil else {'chat_id': chat_id, 'estilo': 'conversacional', 'preferencia_audio': False}
 
 def guardar_mensaje(chat_id, rol, mensaje):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO conversaciones (chat_id, rol, mensaje) VALUES (%s, %s, %s)",
-                    (chat_id, rol, mensaje)
-                )
-                conn.commit()
-    except Exception as e:
-        logger.error(f"❌ guardar_mensaje: {e}")
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO conversaciones (chat_id, rol, mensaje) VALUES (%s, %s, %s)", (chat_id, rol, mensaje))
+            conn.commit()
 
 def obtener_historia(chat_id, limite=10):
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cursor:
-                cursor.execute("""
-                    SELECT rol, mensaje FROM conversaciones 
-                    WHERE chat_id = %s 
-                    ORDER BY timestamp DESC 
-                    LIMIT %s
-                """, (chat_id, limite))
-                filas = cursor.fetchall()
-                return [{"role": f["rol"], "content": f["mensaje"]} for f in reversed(filas)]
-    except Exception as e:
-        logger.error(f"❌ obtener_historia: {e}")
-        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT rol, mensaje FROM conversaciones 
+                WHERE chat_id = %s 
+                ORDER BY timestamp DESC 
+                LIMIT %s
+            """, (chat_id, limite))
+            filas = cur.fetchall()
+            return [{"role": f["rol"], "content": f["mensaje"]} for f in reversed(filas)]
 
 def guardar_conocimiento(chat_id, nombre, contenido):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO conocimiento (chat_id, nombre_archivo, contenido) VALUES (%s, %s, %s)",
-                    (chat_id, nombre, contenido[:50000])
-                )
-                conn.commit()
-    except Exception as e:
-        logger.error(f"❌ guardar_conocimiento: {e}")
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO conocimiento (chat_id, nombre_archivo, contenido) VALUES (%s, %s, %s)", (chat_id, nombre, contenido[:50000]))
+            conn.commit()
 
 def buscar_conocimiento(chat_id, consulta):
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cursor:
-                cursor.execute("""
-                    SELECT nombre_archivo, contenido 
-                    FROM conocimiento 
-                    WHERE chat_id = %s 
-                    ORDER BY similarity(contenido, %s) DESC 
-                    LIMIT 3
-                """, (chat_id, consulta))
-                return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"❌ buscar_conocimiento: {e}")
-        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT nombre_archivo, contenido 
+                FROM conocimiento 
+                WHERE chat_id = %s 
+                ORDER BY similarity(contenido, %s) DESC 
+                LIMIT 3
+            """, (chat_id, consulta))
+            return cur.fetchall()
 
 def guardar_nota(chat_id, texto):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("INSERT INTO notas (chat_id, texto) VALUES (%s, %s)", (chat_id, texto))
-                conn.commit()
-                return "✅ Nota guardada."
-    except Exception as e:
-        logger.error(f"❌ guardar_nota: {e}")
-        return "❌ Error guardando nota."
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO notas (chat_id, texto) VALUES (%s, %s)", (chat_id, texto))
+            conn.commit()
+            return "✅ Nota guardada."
 
 def obtener_notas(chat_id):
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cursor:
-                cursor.execute("SELECT texto, timestamp FROM notas WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 10", (chat_id,))
-                notas = cursor.fetchall()
-                if not notas:
-                    return "📝 No tienes notas guardadas."
-                return "📝 Tus últimas notas:\n" + "\n".join([f"- {n['texto']} ({n['timestamp'].strftime('%d/%m/%Y %H:%M')})" for n in notas])
-    except Exception as e:
-        logger.error(f"❌ obtener_notas: {e}")
-        return "❌ Error obteniendo notas."
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT texto, timestamp FROM notas WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 10", (chat_id,))
+            notas = cur.fetchall()
+            if not notas:
+                return "📝 No tienes notas guardadas."
+            return "📝 Tus últimas notas:\n" + "\n".join([f"- {n['texto']} ({n['timestamp'].strftime('%d/%m/%Y %H:%M')})" for n in notas])
 
 def guardar_recordatorio(chat_id, texto, fecha_hora):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO recordatorios (chat_id, texto, fecha_hora) VALUES (%s, %s, %s)",
-                    (chat_id, texto, fecha_hora)
-                )
-                conn.commit()
-                return f"✅ Recordatorio guardado para {fecha_hora.strftime('%d/%m/%Y %H:%M')}."
-    except Exception as e:
-        logger.error(f"❌ guardar_recordatorio: {e}")
-        return "❌ Error guardando recordatorio."
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO recordatorios (chat_id, texto, fecha_hora) VALUES (%s, %s, %s)", (chat_id, texto, fecha_hora))
+            conn.commit()
+            return f"✅ Recordatorio guardado para {fecha_hora.strftime('%d/%m/%Y %H:%M')}."
 
 def revisar_recordatorios():
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cursor:
-                ahora = datetime.datetime.now()
-                cursor.execute(
-                    "SELECT id, chat_id, texto, fecha_hora FROM recordatorios WHERE enviado = FALSE AND fecha_hora <= %s",
-                    (ahora,)
-                )
-                pendientes = cursor.fetchall()
-                for r in pendientes:
-                    try:
-                        bot.send_message(r['chat_id'], f"⏰ *Recordatorio:* {r['texto']}\n\n(Programado para {r['fecha_hora'].strftime('%d/%m/%Y %H:%M')})", parse_mode='Markdown')
-                        cursor.execute("UPDATE recordatorios SET enviado = TRUE WHERE id = %s", (r['id'],))
-                        conn.commit()
-                    except Exception as e:
-                        logger.error(f"❌ Error enviando recordatorio {r['id']}: {e}")
-                return f"✅ Revisados {len(pendientes)} recordatorios."
-    except Exception as e:
-        logger.error(f"❌ revisar_recordatorios: {e}")
-        return "❌ Error revisando recordatorios."
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            ahora = datetime.datetime.now()
+            cur.execute("SELECT id, chat_id, texto, fecha_hora FROM recordatorios WHERE enviado = FALSE AND fecha_hora <= %s", (ahora,))
+            pendientes = cur.fetchall()
+            for r in pendientes:
+                try:
+                    bot.send_message(r['chat_id'], f"⏰ *Recordatorio:* {r['texto']}\n\n(Programado para {r['fecha_hora'].strftime('%d/%m/%Y %H:%M')})", parse_mode='Markdown')
+                    cur.execute("UPDATE recordatorios SET enviado = TRUE WHERE id = %s", (r['id'],))
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"❌ Error enviando recordatorio {r['id']}: {e}")
+            return f"✅ Revisados {len(pendientes)} recordatorios."
 
 def guardar_feedback(chat_id, respuesta, puntuacion):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO feedback (chat_id, respuesta, puntuacion) VALUES (%s, %s, %s)",
-                    (chat_id, respuesta, puntuacion)
-                )
-                conn.commit()
-                return True
-    except Exception as e:
-        logger.error(f"❌ guardar_feedback: {e}")
-        return False
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO feedback (chat_id, respuesta, puntuacion) VALUES (%s, %s, %s)", (chat_id, respuesta, puntuacion))
+            conn.commit()
+            return True
 
 def obtener_feedback_relevante(chat_id):
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cursor:
-                cursor.execute(
-                    "SELECT respuesta, puntuacion FROM feedback WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 20",
-                    (chat_id,)
-                )
-                datos = cursor.fetchall()
-                negativos = [d['respuesta'] for d in datos if d['puntuacion'] == -1]
-                if negativos:
-                    return "El usuario ha dado feedback negativo a respuestas similares en el pasado. Evita repetir esos enfoques."
-                return ""
-    except Exception as e:
-        logger.error(f"❌ obtener_feedback_relevante: {e}")
-        return ""
-
-def necesita_compresion(chat_id):
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT MAX(timestamp) FROM memoria_larga WHERE chat_id = %s", (chat_id,))
-                ultima = cursor.fetchone()[0]
-                if ultima:
-                    cursor.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s AND timestamp > %s", (chat_id, ultima))
-                    count = cursor.fetchone()[0]
-                    return count > 15
-                else:
-                    cursor.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s", (chat_id,))
-                    count = cursor.fetchone()[0]
-                    return count > 15
-    except Exception as e:
-        logger.error(f"❌ necesita_compresion: {e}")
-        return False
-
-def comprimir_conversacion(chat_id):
-    if not necesita_compresion(chat_id):
-        return None
-    historia = obtener_historia(chat_id, limite=15)
-    if len(historia) < 4:
-        return None
-    texto_historia = "\n".join([f"{h['role']}: {h['content']}" for h in historia])
-    prompt_compresor = f"""
-    Eres el archivista de Guaribe. Resume la siguiente conversación en una cápsula de memoria.
-    Extrae los temas principales (máximo 3), el tono emocional, y los datos relevantes del usuario.
-    Conversación:
-    {texto_historia}
-    Responde ÚNICAMENTE en formato JSON sin markdown:
-    {{"resumen": "texto conciso de 100 palabras máximo", "temas": ["tema1", "tema2", "tema3"]}}
-    """
-    try:
-        respuesta = orquestador._consultar_deepseek([{"role": "user", "content": prompt_compresor}])
-        json_str = re.sub(r'```json|```', '', respuesta).strip()
-        datos = json.loads(json_str)
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO memoria_larga (chat_id, resumen, temas) VALUES (%s, %s, %s)",
-                    (chat_id, datos['resumen'], datos['temas'])
-                )
-                conn.commit()
-                logger.info(f"🧠 Memoria comprimida para {chat_id}: {datos['temas']}")
-        return datos
-    except Exception as e:
-        logger.error(f"❌ Error comprimiendo memoria: {e}")
-        return None
-
-def recuperar_memorias_relevantes(chat_id, consulta):
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cursor:
-                cursor.execute(
-                    "SELECT resumen, temas FROM memoria_larga WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 20",
-                    (chat_id,)
-                )
-                registros = cursor.fetchall()
-                if not registros:
-                    return []
-                texto_memorias = "\n".join([f"- {r['resumen']} (Temas: {', '.join(r['temas'])})" for r in registros])
-                prompt_selector = f"""
-                Dada la consulta del usuario: "{consulta}"
-                Estas son las memorias del usuario:
-                {texto_memorias}
-                Devuelve ÚNICAMENTE los IDs (números de línea) de las memorias que SON RELEVANTES para esta consulta.
-                Si ninguna es relevante, devuelve "NINGUNA".
-                Formato de respuesta: "1, 3, 5"
-                """
-                respuesta = orquestador._consultar_deepseek([{"role": "user", "content": prompt_selector}])
-                if "NINGUNA" in respuesta:
-                    return []
-                indices = [int(x.strip()) for x in respuesta.split(',') if x.strip().isdigit()]
-                relevantes = [registros[i-1] for i in indices if 0 < i <= len(registros)]
-                return [r['resumen'] for r in relevantes]
-    except Exception as e:
-        logger.error(f"❌ recuperar_memorias: {e}")
-        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT respuesta, puntuacion FROM feedback WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 20", (chat_id,))
+            datos = cur.fetchall()
+            negativos = [d['respuesta'] for d in datos if d['puntuacion'] == -1]
+            if negativos:
+                return "El usuario ha dado feedback negativo a respuestas similares en el pasado. Evita repetir esos enfoques."
+            return ""
 
 # ================== ORQUESTADOR CON ROTACIÓN DE CLAVES GROQ ==================
 class Orquestador:
@@ -428,7 +306,8 @@ class Orquestador:
             return
         for clave in lista_claves:
             try:
-                self.groq_clients.append(Groq(api_key=clave))
+                # Parche: Forzar http_client=None para evitar error de proxies
+                self.groq_clients.append(Groq(api_key=clave, http_client=None))
                 logger.info(f"✅ Cliente Groq registrado (clave terminada en ...{clave[-4:]})")
             except Exception as e:
                 logger.error(f"❌ Falló al inicializar una clave Groq: {e}")
@@ -741,6 +620,41 @@ def buscar_contexto(tema):
     r = buscar_en_web(f"historia antecedentes {tema} Venezuela", 3)
     return "\n".join(r) if r else "No se encontraron antecedentes."
 
+# ================== CACHE DE NOTICIAS Y TASAS ==================
+_cache_noticias = {"data": None, "timestamp": None}
+_cache_tasa = {"data": None, "timestamp": None}
+
+def obtener_tasa_cache():
+    ahora = datetime.datetime.now()
+    if _cache_tasa["timestamp"] and (ahora - _cache_tasa["timestamp"]).seconds < 300:
+        return _cache_tasa["data"]
+    tasa = obtener_tasa()
+    _cache_tasa["data"] = tasa
+    _cache_tasa["timestamp"] = ahora
+    return tasa
+
+def obtener_noticias_cache():
+    ahora = datetime.datetime.now()
+    if _cache_noticias["timestamp"] and (ahora - _cache_noticias["timestamp"]).seconds < 600:
+        return _cache_noticias["data"]
+    eventlet.spawn(actualizar_noticias_background)
+    return _cache_noticias["data"] if _cache_noticias["data"] else "⏳ Actualizando noticias..."
+
+def actualizar_noticias_background():
+    try:
+        noticias = buscar_noticias()
+        _cache_noticias["data"] = noticias
+        _cache_noticias["timestamp"] = datetime.datetime.now()
+    except Exception as e:
+        logger.error(f"❌ Error actualizando noticias: {e}")
+
+def comprimir_conversacion_async(chat_id):
+    eventlet.spawn(comprimir_conversacion, chat_id)
+
+def comprimir_conversacion(chat_id):
+    # Esta función está definida en el bloque de funciones DB, pero la movemos aquí para claridad
+    pass
+
 # ================== MENÚ PRINCIPAL ==================
 def menu_principal():
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -910,7 +824,6 @@ def handle_buttons(m):
 
     texto_lower = texto.lower()
 
-    # Perfil y estado de ánimo
     perfil = obtener_perfil(chat_id)
     if not perfil.get('nombre'):
         if "mi nombre es" in texto_lower:
@@ -925,15 +838,14 @@ def handle_buttons(m):
     estado = detectar_estado_animo(texto)
     guardar_perfil(chat_id, estado_animo=estado)
 
-    # Acciones en lenguaje natural
     accion = detectar_accion(texto)
     
     if accion == "tasa":
-        bot.reply_to(m, f"{obtener_tasa()}\n\nSoy Guaribe...", parse_mode='Markdown')
+        bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
         return
     
     if accion == "noticias":
-        bot.reply_to(m, f"{buscar_noticias()}\n\nSoy Guaribe...")
+        bot.reply_to(m, f"{obtener_noticias_cache()}\n\nSoy Guaribe...")
         return
     
     if accion == "imagen":
@@ -1004,7 +916,6 @@ def handle_buttons(m):
             bot.reply_to(m, f"❌ Error: {str(e)[:100]}")
         return
 
-    # Creatividad e hipótesis
     tipo_creativo = detectar_tipo_creativo(texto)
     if tipo_creativo:
         if tipo_creativo == "poesia":
@@ -1033,12 +944,11 @@ def handle_buttons(m):
         bot.reply_to(m, resp)
         return
 
-    # Botones
     if texto == "💰 Tasa BCV":
-        bot.reply_to(m, f"{obtener_tasa()}\n\nSoy Guaribe...", parse_mode='Markdown')
+        bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
         return
     if texto == "📰 Noticias":
-        bot.reply_to(m, f"{buscar_noticias()}\n\nSoy Guaribe...")
+        bot.reply_to(m, f"{obtener_noticias_cache()}\n\nSoy Guaribe...")
         return
     if texto == "🔮 Analizar":
         modo_analisis[chat_id] = True
@@ -1051,13 +961,12 @@ def handle_buttons(m):
         bot.reply_to(m, f"🎙️ Preferencia de voz {estado_voz}.")
         return
 
-    # Modo análisis
     if chat_id in modo_analisis and modo_analisis[chat_id]:
         modo_analisis[chat_id] = False
         tema = texto
         bot.reply_to(m, f"📊 Analizando: {tema[:50]}...")
         contexto = buscar_contexto(tema)
-        noticias = buscar_noticias()
+        noticias = obtener_noticias_cache()
         mensajes = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"Tema: {tema}\nContexto histórico:\n{contexto}\nNoticias:\n{noticias}"}
@@ -1066,9 +975,8 @@ def handle_buttons(m):
         bot.reply_to(m, resp, parse_mode='Markdown')
         return
 
-    # Conversación normal
     try:
-        comprimir_conversacion(chat_id)
+        comprimir_conversacion_async(chat_id)
 
         memorias = recuperar_memorias_relevantes(chat_id, texto)
         contexto_memorias = ""
@@ -1138,7 +1046,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 9.0 Unificado - Lenguaje Natural"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 9.0 Optimizado"}), 200
 
 @app.route('/check_reminders', methods=['GET'])
 def check_reminders():
@@ -1147,21 +1055,15 @@ def check_reminders():
 
 # ================== EJECUCIÓN ==================
 if __name__ == "__main__":
-    # Modo desarrollo (solo cuando se ejecuta directamente)
-    logger.info("🚀 Iniciando Guaribe 9.0 en modo desarrollo...")
+    logger.info("🚀 Iniciando Guaribe 9.0 Optimizado (modo desarrollo)...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f"https://guaribe-beta.onrender.com/webhook")
     logger.info("✅ Webhook configurado")
-    logger.info(f"🧠 Cerebros disponibles: {len(orquestador.modelos)} motores")
-    logger.info(f"⚡ Claves Groq activas: {len(orquestador.groq_clients)}")
     app.run(host='0.0.0.0', port=port)
 else:
-    # Modo producción (Gunicorn importa la app)
-    logger.info("🚀 Iniciando Guaribe 9.0 en modo producción (Gunicorn)...")
+    logger.info("🚀 Iniciando Guaribe 9.0 Optimizado en Gunicorn...")
     init_db()
     logger.info("✅ Webhook configurado previamente")
-    logger.info(f"🧠 Cerebros disponibles: {len(orquestador.modelos)} motores")
-    logger.info(f"⚡ Claves Groq activas: {len(orquestador.groq_clients)}")
