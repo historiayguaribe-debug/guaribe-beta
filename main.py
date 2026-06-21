@@ -231,7 +231,23 @@ def necesita_compresion(chat_id):
                 cur.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s", (chat_id,))
                 return cur.fetchone()[0] > 50
 
-# ==================== COMPRESIÓN DE MEMORIA ====================
+# ==================== COMPRESIÓN DE MEMORIA (MEJORADA) ====================
+def extraer_json_de_respuesta(respuesta):
+    """Intenta extraer un JSON válido de una respuesta que puede tener texto adicional."""
+    # Buscar algo que parezca un JSON (objeto o array)
+    match = re.search(r'\{[^{}]*\}', respuesta)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except:
+            pass
+    # Si no, intentar limpiar y parsear todo
+    try:
+        limpio = re.sub(r'```json|```', '', respuesta).strip()
+        return json.loads(limpio)
+    except:
+        return None
+
 def comprimir_conversacion(chat_id):
     if not necesita_compresion(chat_id):
         return None
@@ -249,12 +265,8 @@ def comprimir_conversacion(chat_id):
     """
     try:
         respuesta = orquestador.consultar([{"role": "user", "content": prompt_compresor}], usar_busqueda=False)
-        json_str = re.sub(r'```json|```', '', respuesta).strip()
-        if not json_str.startswith('{') or not json_str.endswith('}'):
-            logger.warning(f"⚠️ Respuesta no es JSON: {json_str[:100]}...")
-            return None
-        datos = json.loads(json_str)
-        if not datos.get('resumen') or not datos.get('temas'):
+        datos = extraer_json_de_respuesta(respuesta)
+        if not datos or not datos.get('resumen') or not datos.get('temas'):
             logger.warning("⚠️ JSON incompleto en compresión")
             return None
         with get_connection() as conn:
@@ -266,9 +278,6 @@ def comprimir_conversacion(chat_id):
                 conn.commit()
                 logger.info(f"🧠 Memoria comprimida para {chat_id}: {datos['temas']}")
         return datos
-    except json.JSONDecodeError:
-        logger.warning(f"⚠️ La respuesta del compresor no es JSON válido: {respuesta[:200]}...")
-        return None
     except Exception as e:
         logger.warning(f"⚠️ Error comprimiendo memoria (no crítico): {e}")
         return None
@@ -731,20 +740,23 @@ def cmd_start(m):
                     "¡Seguimos razonando! 🇻🇪🤠🏛️",
                     parse_mode='Markdown', reply_markup=menu_principal())
 
-# ==================== COMANDO DE ADMINISTRACIÓN (CON DEPURACIÓN) ====================
+# ==================== COMANDO DE ADMINISTRACIÓN (CORREGIDO) ====================
 @bot.message_handler(commands=['admin_clean'])
 def cmd_admin_clean(m):
     chat_id_actual = str(m.chat.id)
     admin_id_configurado = ADMIN_CHAT_ID or "No configurado"
+    
+    # Si no coincide, mostrar mensaje de depuración
     if chat_id_actual != admin_id_configurado:
         bot.reply_to(m, f"⛔ No autorizado.\n\nTu chat_id: `{chat_id_actual}`\nAdmin configurado: `{admin_id_configurado}`\n\nCorrige la variable `ADMIN_CHAT_ID` en Render y redeploya.", parse_mode='Markdown')
         return
     
+    # Si coincide, proceder con la limpieza
     bot.reply_to(m, "🧹 Limpiando base de datos...")
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Borrar solo URLs de conocimiento (que empiecen con http)
+                # Borrar solo URLs de conocimiento
                 cur.execute("DELETE FROM conocimiento WHERE nombre_archivo LIKE 'http%' OR contenido LIKE '%http%';")
                 # Borrar mensajes cortos y saludos de conversaciones
                 cur.execute("""
@@ -762,6 +774,7 @@ def cmd_admin_clean(m):
                 
                 bot.reply_to(m, f"✅ Base de datos limpiada:\n- conocimiento: {count_docs} registros (solo URLs eliminadas)\n- conversaciones: {count_conv} registros (ruido eliminado)")
     except Exception as e:
+        logger.error(f"❌ Error en /admin_clean: {e}")
         bot.reply_to(m, f"❌ Error: {e}")
 
 @bot.message_handler(content_types=['photo'])
@@ -895,6 +908,11 @@ def handle_buttons(m):
     chat_id = m.chat.id
     texto = m.text if hasattr(m, 'text') else ""
     if not texto:
+        return
+    
+    # Ignorar comandos (los que empiezan con /) para que no pasen por el router
+    if texto.startswith('/'):
+        logger.info(f"⏭️ Ignorando comando en handler principal: {texto}")
         return
     
     texto = sanitizar_texto(texto)
