@@ -731,20 +731,36 @@ def cmd_start(m):
                     "¡Seguimos razonando! 🇻🇪🤠🏛️",
                     parse_mode='Markdown', reply_markup=menu_principal())
 
-# ==================== COMANDO DE ADMINISTRACIÓN PARA LIMPIAR DB ====================
+# ==================== COMANDO DE ADMINISTRACIÓN (CON DEPURACIÓN) ====================
 @bot.message_handler(commands=['admin_clean'])
 def cmd_admin_clean(m):
-    if str(m.chat.id) != ADMIN_CHAT_ID:
-        bot.reply_to(m, "⛔ No autorizado.")
+    chat_id_actual = str(m.chat.id)
+    admin_id_configurado = ADMIN_CHAT_ID or "No configurado"
+    if chat_id_actual != admin_id_configurado:
+        bot.reply_to(m, f"⛔ No autorizado.\n\nTu chat_id: `{chat_id_actual}`\nAdmin configurado: `{admin_id_configurado}`\n\nCorrige la variable `ADMIN_CHAT_ID` en Render y redeploya.", parse_mode='Markdown')
         return
+    
     bot.reply_to(m, "🧹 Limpiando base de datos...")
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM conocimiento;")
-                cur.execute("DELETE FROM conversaciones WHERE LENGTH(mensaje) < 3 OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 'como estas', 'buenas', 'hey', 'epa', 'epale');")
+                # Borrar solo URLs de conocimiento (que empiecen con http)
+                cur.execute("DELETE FROM conocimiento WHERE nombre_archivo LIKE 'http%' OR contenido LIKE '%http%';")
+                # Borrar mensajes cortos y saludos de conversaciones
+                cur.execute("""
+                    DELETE FROM conversaciones 
+                    WHERE LENGTH(mensaje) < 3 
+                    OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 'como estas', 'buenas', 'hey', 'epa', 'epale', 'Buenos días', 'Buenas tardes', 'Buenas noches');
+                """)
                 conn.commit()
-                bot.reply_to(m, "✅ Base de datos limpiada:\n- conocimiento: eliminado\n- conversaciones: ruido eliminado")
+                
+                # Contar lo que queda
+                cur.execute("SELECT COUNT(*) FROM conocimiento;")
+                count_docs = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM conversaciones;")
+                count_conv = cur.fetchone()[0]
+                
+                bot.reply_to(m, f"✅ Base de datos limpiada:\n- conocimiento: {count_docs} registros (solo URLs eliminadas)\n- conversaciones: {count_conv} registros (ruido eliminado)")
     except Exception as e:
         bot.reply_to(m, f"❌ Error: {e}")
 
@@ -1108,7 +1124,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 9.2 - con limpieza DB y lectura de URLs"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 9.3 - con limpieza selectiva y depuración"}), 200
 
 @app.route('/admin/clean', methods=['GET'])
 def admin_clean():
@@ -1118,10 +1134,14 @@ def admin_clean():
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM conocimiento;")
-                cur.execute("DELETE FROM conversaciones WHERE LENGTH(mensaje) < 3 OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 'como estas', 'buenas', 'hey', 'epa', 'epale');")
+                cur.execute("DELETE FROM conocimiento WHERE nombre_archivo LIKE 'http%' OR contenido LIKE '%http%';")
+                cur.execute("""
+                    DELETE FROM conversaciones 
+                    WHERE LENGTH(mensaje) < 3 
+                    OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 'como estas', 'buenas', 'hey', 'epa', 'epale', 'Buenos días', 'Buenas tardes', 'Buenas noches');
+                """)
                 conn.commit()
-                return jsonify({"status": "ok", "message": "Base de datos limpiada"})
+                return jsonify({"status": "ok", "message": "Base de datos limpiada (solo URLs y ruido)"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -1138,7 +1158,7 @@ def set_webhook():
 
 # ==================== CONFIGURACIÓN DEL WEBHOOK AL INICIAR ====================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe 9.2 en modo desarrollo...")
+    logger.info("🚀 Iniciando Guaribe 9.3 en modo desarrollo...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
@@ -1148,7 +1168,7 @@ if __name__ == "__main__":
     app.run(host='0.0.0.0', port=port)
 else:
     if os.environ.get('WEBHOOK_SET') != 'true':
-        logger.info("🚀 Iniciando Guaribe 9.2 en modo producción (Gevent)...")
+        logger.info("🚀 Iniciando Guaribe 9.3 en modo producción (Gevent)...")
         init_db()
         webhook_url = f"https://guaribe-beta.onrender.com/webhook"
         for i in range(5):
