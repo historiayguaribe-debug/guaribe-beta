@@ -35,7 +35,14 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ==================== BASE DE DATOS ====================
+# ==================== CACHÉ Y BASE DE DATOS ====================
+# Caché para respuestas frecuentes (evita llamadas repetidas a IA)
+cache_respuestas = {}
+cache_tiempo = {}
+
+_cache_noticias = {"data": None, "timestamp": None}
+_cache_tasa = {"data": None, "timestamp": None}
+
 def get_connection(retries=3):
     for i in range(retries):
         try:
@@ -47,9 +54,6 @@ def get_connection(retries=3):
                 raise
             time.sleep(2 ** i)
             logger.warning(f"Reintentando conexión DB ({i+1}/{retries})")
-
-_cache_noticias = {"data": None, "timestamp": None}
-_cache_tasa = {"data": None, "timestamp": None}
 
 def init_db():
     with get_connection() as conn:
@@ -180,15 +184,9 @@ def obtener_historia(chat_id, limite=6):
             return [{"role": f["rol"], "content": f["mensaje"]} for f in reversed(filas)]
 
 def guardar_conocimiento(chat_id, nombre, contenido):
-    # Filtrar contenido basura antes de guardar
-    contenido_filtrado = contenido[:50000]
-    # Si el contenido parece un mensaje de error de robot o una página de inicio, lo guardamos pero con una marca
-    # para que después no se use como documento útil
-    if "Please set a user-agent" in contenido_filtrado or "Looks like you're a bot" in contenido_filtrado or "You need to enable JavaScript" in contenido_filtrado:
-        contenido_filtrado = "[ERROR] " + contenido_filtrado
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO conocimiento (chat_id, nombre_archivo, contenido) VALUES (%s, %s, %s)", (chat_id, nombre, contenido_filtrado))
+            cur.execute("INSERT INTO conocimiento (chat_id, nombre_archivo, contenido) VALUES (%s, %s, %s)", (chat_id, nombre, contenido[:50000]))
             conn.commit()
 
 def buscar_conocimiento(chat_id, consulta):
@@ -201,20 +199,7 @@ def buscar_conocimiento(chat_id, consulta):
                 ORDER BY similarity(contenido, %s) DESC 
                 LIMIT 3
             """, (chat_id, consulta))
-            resultados = cur.fetchall()
-            # Filtrar resultados que sean basura (errores de robots, páginas de inicio, etc.)
-            filtrados = []
-            for r in resultados:
-                contenido = r['contenido']
-                if "[ERROR]" in contenido:
-                    continue
-                if len(contenido) < 20:
-                    continue
-                # Si el contenido contiene frases típicas de error de acceso, lo saltamos
-                if any(frase in contenido for frase in ["Please set a user-agent", "Looks like you're a bot", "You need to enable JavaScript"]):
-                    continue
-                filtrados.append(r)
-            return filtrados
+            return cur.fetchall()
 
 def guardar_feedback(chat_id, respuesta, puntuacion):
     with get_connection() as conn:
@@ -314,6 +299,63 @@ def recuperar_memorias_relevantes(chat_id, consulta):
             relevantes = [registros[i-1] for i in indices if 0 < i <= len(registros)]
             return [r['resumen'] for r in relevantes]
 
+# ==================== NUEVO: CACHÉ DE RESPUESTAS ====================
+def obtener_respuesta_cache(consulta):
+    """Devuelve respuesta en caché si existe y no ha expirado (1 hora)"""
+    if consulta in cache_respuestas:
+        if (datetime.datetime.now() - cache_tiempo[consulta]).seconds < 3600:
+            return cache_respuestas[consulta]
+        else:
+            # Eliminar si expiró
+            del cache_respuestas[consulta]
+            del cache_tiempo[consulta]
+    return None
+
+def guardar_respuesta_cache(consulta, respuesta):
+    cache_respuestas[consulta] = respuesta
+    cache_tiempo[consulta] = datetime.datetime.now()
+
+# ==================== NUEVO: LECTURA DE URLS EN TIEMPO REAL ====================
+def leer_url_en_tiempo_real(url):
+    """
+    Visita una URL, extrae el texto limpio y lo devuelve.
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Eliminar elementos no deseados
+        for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe']):
+            element.decompose()
+        
+        # Extraer texto de párrafos y títulos
+        texto = ' '.join([p.get_text() for p in soup.find_all(['p', 'h1', 'h2', 'h3'])])
+        
+        # Limpiar texto
+        texto = re.sub(r'\s+', ' ', texto).strip()
+        
+        # Limitar a 3000 caracteres para no saturar el prompt
+        if len(texto) > 3000:
+            texto = texto[:3000] + "... [Texto truncado]"
+        
+        return {
+            'exito': True,
+            'contenido': texto,
+            'titulo': soup.title.string if soup.title else 'Sin título',
+            'url': url
+        }
+    except Exception as e:
+        logger.error(f"❌ Error leyendo URL {url}: {e}")
+        return {
+            'exito': False,
+            'error': str(e)
+        }
+
 # ==================== ORQUESTADOR ====================
 class Orquestador:
     def __init__(self):
@@ -344,6 +386,15 @@ class Orquestador:
             self.modelos.append(("Groq", self._consultar_groq))
 
     def consultar(self, mensajes, usar_busqueda=False, intentos=2):
+        # Verificar caché
+        # Para simplificar, cacheamos solo consultas simples (una sola pregunta)
+        if len(mensajes) == 1 and mensajes[0]['role'] == 'user':
+            consulta = mensajes[0]['content']
+            cacheada = obtener_respuesta_cache(consulta)
+            if cacheada:
+                logger.info(f"✅ Respuesta desde caché para: {consulta[:30]}...")
+                return cacheada
+        
         for nombre, funcion in self.modelos:
             for intento in range(intentos):
                 try:
@@ -353,6 +404,9 @@ class Orquestador:
                         respuesta = funcion(mensajes)
                     if respuesta:
                         self.modelo_activo = nombre
+                        # Guardar en caché si es una consulta simple
+                        if len(mensajes) == 1 and mensajes[0]['role'] == 'user':
+                            guardar_respuesta_cache(consulta, respuesta)
                         return respuesta
                 except Exception as e:
                     logger.warning(f"⚠️ Intento {intento+1} falló en {nombre}: {e}")
@@ -686,6 +740,7 @@ def cmd_start(m):
                     "📸 Envía fotos para que las analice.\n"
                     "🎙️ Envía mensajes de voz y te responderé.\n"
                     "👍/👎 Califica mis respuestas para que aprenda.\n"
+                    "🌐 También puedo leer URLs en tiempo real. Solo pégame un enlace.\n"
                     "¡Seguimos razonando! 🇻🇪🤠🏛️",
                     parse_mode='Markdown', reply_markup=menu_principal())
 
@@ -849,11 +904,24 @@ def handle_buttons(m):
             bot.reply_to(m, respuesta_saludo)
             return
 
-        # --- PASO 3: ESTADO DE ÁNIMO ---
+        # --- PASO 3: DETECTAR URLs EN EL MENSAJE (NUEVO) ---
+        urls = re.findall(r'https?://[^\s]+', texto)
+        if urls:
+            bot.reply_to(m, "🌐 Leyendo el enlace que me diste...")
+            for url in urls:
+                resultado = leer_url_en_tiempo_real(url)
+                if resultado['exito']:
+                    # Inyectar el contenido como contexto
+                    texto = f"El usuario compartió este enlace: {url}\n\nContenido extraído:\n{resultado['contenido']}\n\nPregunta del usuario: {texto.replace(url, '').strip() or 'Resume este contenido.'}"
+                else:
+                    bot.reply_to(m, f"⚠️ No pude leer {url}. {resultado['error']}")
+                    return
+
+        # --- PASO 4: ACTUALIZAR ESTADO DE ÁNIMO ---
         estado = detectar_estado_animo(texto)
         guardar_perfil(chat_id, estado_animo=estado)
 
-        # --- PASO 4: ACCIONES RÁPIDAS (TASA, NOTICIAS, IMAGEN) ---
+        # --- PASO 5: ACCIONES RÁPIDAS (TASA, NOTICIAS, IMAGEN) ---
         accion = detectar_accion(texto)
 
         if accion == "tasa":
@@ -880,7 +948,7 @@ def handle_buttons(m):
                 bot.reply_to(m, "❌ No pude generar la imagen.")
             return
 
-        # --- PASO 5: BOTONES ESPECIALES ---
+        # --- PASO 6: BOTONES ESPECIALES ---
         if texto == "💰 Tasa BCV":
             bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
             return
@@ -898,7 +966,7 @@ def handle_buttons(m):
             bot.reply_to(m, f"🎙️ Preferencia de voz {estado_voz}.")
             return
 
-        # --- PASO 6: MODO ANÁLISIS ---
+        # --- PASO 7: MODO ANÁLISIS ---
         if chat_id in modo_analisis and modo_analisis[chat_id]:
             modo_analisis[chat_id] = False
             tema = texto
@@ -913,7 +981,7 @@ def handle_buttons(m):
             bot.reply_to(m, resp, parse_mode='Markdown')
             return
 
-        # --- PASO 7: TIPO CREATIVO ---
+        # --- PASO 8: TIPO CREATIVO ---
         tipo_creativo = detectar_tipo_creativo(texto)
         if tipo_creativo:
             if tipo_creativo == "poesia":
@@ -941,7 +1009,7 @@ def handle_buttons(m):
             bot.reply_to(m, resp)
             return
 
-        # --- PASO 8: CONSULTA GENERAL CON ROUTER ---
+        # --- PASO 9: CONSULTA GENERAL CON ROUTER ---
         bot.reply_to(m, "⏳ Procesando tu solicitud...")
 
         modelo = router_consulta(texto)
@@ -1037,7 +1105,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 9.0 - sin correos/notas/recordatorios"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 9.2 - con lectura de URLs en tiempo real y caché"}), 200
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
@@ -1052,7 +1120,7 @@ def set_webhook():
 
 # ==================== CONFIGURACIÓN DEL WEBHOOK AL INICIAR ====================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe 9.0 en modo desarrollo...")
+    logger.info("🚀 Iniciando Guaribe 9.2 en modo desarrollo...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
@@ -1062,7 +1130,7 @@ if __name__ == "__main__":
     app.run(host='0.0.0.0', port=port)
 else:
     if os.environ.get('WEBHOOK_SET') != 'true':
-        logger.info("🚀 Iniciando Guaribe 9.0 en modo producción (Gevent)...")
+        logger.info("🚀 Iniciando Guaribe 9.2 en modo producción (Gevent)...")
         init_db()
         webhook_url = f"https://guaribe-beta.onrender.com/webhook"
         for i in range(5):
