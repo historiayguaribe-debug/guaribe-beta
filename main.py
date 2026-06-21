@@ -276,6 +276,7 @@ def necesita_compresion(chat_id):
                 cur.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s", (chat_id,))
                 return cur.fetchone()[0] > 50
 
+# ==================== MEJORA: comprimir_conversacion con fallback y mejor manejo ====================
 def comprimir_conversacion(chat_id):
     if not necesita_compresion(chat_id):
         return None
@@ -292,7 +293,9 @@ def comprimir_conversacion(chat_id):
     {{"resumen": "texto conciso de 100 palabras máximo", "temas": ["tema1", "tema2", "tema3"]}}
     """
     try:
-        respuesta = orquestador._consultar_deepseek([{"role": "user", "content": prompt_compresor}])
+        # Usamos orquestador.consultar (fallback a Groq si DeepSeek falla)
+        respuesta = orquestador.consultar([{"role": "user", "content": prompt_compresor}], usar_busqueda=False)
+        # Limpiar posibles marcadores markdown
         json_str = re.sub(r'```json|```', '', respuesta).strip()
         datos = json.loads(json_str)
         with get_connection() as conn:
@@ -304,8 +307,11 @@ def comprimir_conversacion(chat_id):
                 conn.commit()
                 logger.info(f"🧠 Memoria comprimida para {chat_id}: {datos['temas']}")
         return datos
+    except json.JSONDecodeError as e:
+        logger.warning(f"⚠️ La respuesta del compresor no es JSON válido: {respuesta[:200]}...")
+        return None
     except Exception as e:
-        logger.error(f"❌ Error comprimiendo memoria: {e}")
+        logger.warning(f"⚠️ Error comprimiendo memoria (no crítico): {e}")
         return None
 
 def comprimir_conversacion_async(chat_id):
@@ -509,6 +515,7 @@ def detectar_tipo_creativo(texto):
         return "prediccion"
     return None
 
+# ==================== MEJORA: detectar_accion con más frases para tasa ====================
 def detectar_accion(texto):
     texto = texto.lower()
     if "enviar correo" in texto or "mandar email" in texto or "email a" in texto:
@@ -521,7 +528,8 @@ def detectar_accion(texto):
         return "imagen"
     if "noticias" in texto or "qué pasó" in texto or "actualidad" in texto:
         return "noticias"
-    if any(p in texto for p in ["tasa", "dólar", "dolar", "bcv", "cambio"]):
+    # MEJORA: detectar preguntas sobre tasa/dólar
+    if any(p in texto for p in ["tasa", "dólar", "dolar", "bcv", "cambio", "precio del dólar", "valor del dólar", "cuánto está el dólar", "precio del dolar", "cuánto cuesta el dólar"]):
         return "tasa"
     return None
 
