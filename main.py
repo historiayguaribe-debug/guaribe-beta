@@ -12,7 +12,6 @@ import docx
 import base64
 import json
 import re
-import smtplib
 import datetime
 import hashlib
 import threading
@@ -24,8 +23,6 @@ from io import BytesIO
 from PIL import Image
 from groq import Groq
 from gtts import gTTS
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 # ==================== CONFIGURACIÓN ====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,10 +32,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-EMAIL_USER = os.environ.get("EMAIL_USER")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -100,24 +93,6 @@ def init_db():
                 )
             """)
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS notas (
-                    id SERIAL PRIMARY KEY,
-                    chat_id BIGINT NOT NULL,
-                    texto TEXT NOT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS recordatorios (
-                    id SERIAL PRIMARY KEY,
-                    chat_id BIGINT NOT NULL,
-                    texto TEXT NOT NULL,
-                    fecha_hora TIMESTAMP NOT NULL,
-                    enviado BOOLEAN DEFAULT FALSE,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS feedback (
                     id SERIAL PRIMARY KEY,
                     chat_id BIGINT NOT NULL,
@@ -171,17 +146,14 @@ def obtener_perfil(chat_id):
             perfil = cur.fetchone()
             return perfil if perfil else {'chat_id': chat_id, 'estilo': 'conversacional', 'preferencia_audio': False}
 
-# === NUEVO: guardar mensaje con límite de 3 intercambios y try/except ===
 def guardar_mensaje(chat_id, rol, mensaje):
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Insertar el nuevo mensaje
                 cur.execute(
                     "INSERT INTO conversaciones (chat_id, rol, mensaje) VALUES (%s, %s, %s)",
                     (chat_id, rol, mensaje)
                 )
-                # Eliminar los mensajes más antiguos hasta dejar solo los últimos 6 (3 intercambios usuario-asistente)
                 cur.execute("""
                     DELETE FROM conversaciones 
                     WHERE id IN (
@@ -194,7 +166,6 @@ def guardar_mensaje(chat_id, rol, mensaje):
                 conn.commit()
     except Exception as e:
         logger.error(f"❌ Error guardando mensaje en DB (no crítico): {e}")
-        # No lanzamos excepción para que el bot no falle
 
 def obtener_historia(chat_id, limite=6):
     with get_connection() as conn:
@@ -209,9 +180,15 @@ def obtener_historia(chat_id, limite=6):
             return [{"role": f["rol"], "content": f["mensaje"]} for f in reversed(filas)]
 
 def guardar_conocimiento(chat_id, nombre, contenido):
+    # Filtrar contenido basura antes de guardar
+    contenido_filtrado = contenido[:50000]
+    # Si el contenido parece un mensaje de error de robot o una página de inicio, lo guardamos pero con una marca
+    # para que después no se use como documento útil
+    if "Please set a user-agent" in contenido_filtrado or "Looks like you're a bot" in contenido_filtrado or "You need to enable JavaScript" in contenido_filtrado:
+        contenido_filtrado = "[ERROR] " + contenido_filtrado
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO conocimiento (chat_id, nombre_archivo, contenido) VALUES (%s, %s, %s)", (chat_id, nombre, contenido[:50000]))
+            cur.execute("INSERT INTO conocimiento (chat_id, nombre_archivo, contenido) VALUES (%s, %s, %s)", (chat_id, nombre, contenido_filtrado))
             conn.commit()
 
 def buscar_conocimiento(chat_id, consulta):
@@ -224,45 +201,20 @@ def buscar_conocimiento(chat_id, consulta):
                 ORDER BY similarity(contenido, %s) DESC 
                 LIMIT 3
             """, (chat_id, consulta))
-            return cur.fetchall()
-
-def guardar_nota(chat_id, texto):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO notas (chat_id, texto) VALUES (%s, %s)", (chat_id, texto))
-            conn.commit()
-            return "✅ Nota guardada."
-
-def obtener_notas(chat_id):
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT texto, timestamp FROM notas WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 10", (chat_id,))
-            notas = cur.fetchall()
-            if not notas:
-                return "📝 No tienes notas guardadas."
-            return "📝 Tus últimas notas:\n" + "\n".join([f"- {n['texto']} ({n['timestamp'].strftime('%d/%m/%Y %H:%M')})" for n in notas])
-
-def guardar_recordatorio(chat_id, texto, fecha_hora):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO recordatorios (chat_id, texto, fecha_hora) VALUES (%s, %s, %s)", (chat_id, texto, fecha_hora))
-            conn.commit()
-            return f"✅ Recordatorio guardado para {fecha_hora.strftime('%d/%m/%Y %H:%M')}."
-
-def revisar_recordatorios():
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            ahora = datetime.datetime.now()
-            cur.execute("SELECT id, chat_id, texto, fecha_hora FROM recordatorios WHERE enviado = FALSE AND fecha_hora <= %s", (ahora,))
-            pendientes = cur.fetchall()
-            for r in pendientes:
-                try:
-                    bot.send_message(r['chat_id'], f"⏰ *Recordatorio:* {r['texto']}\n\n(Programado para {r['fecha_hora'].strftime('%d/%m/%Y %H:%M')})", parse_mode='Markdown')
-                    cur.execute("UPDATE recordatorios SET enviado = TRUE WHERE id = %s", (r['id'],))
-                    conn.commit()
-                except Exception as e:
-                    logger.error(f"❌ Error enviando recordatorio {r['id']}: {e}")
-            return f"✅ Revisados {len(pendientes)} recordatorios."
+            resultados = cur.fetchall()
+            # Filtrar resultados que sean basura (errores de robots, páginas de inicio, etc.)
+            filtrados = []
+            for r in resultados:
+                contenido = r['contenido']
+                if "[ERROR]" in contenido:
+                    continue
+                if len(contenido) < 20:
+                    continue
+                # Si el contenido contiene frases típicas de error de acceso, lo saltamos
+                if any(frase in contenido for frase in ["Please set a user-agent", "Looks like you're a bot", "You need to enable JavaScript"]):
+                    continue
+                filtrados.append(r)
+            return filtrados
 
 def guardar_feedback(chat_id, respuesta, puntuacion):
     with get_connection() as conn:
@@ -297,7 +249,7 @@ def necesita_compresion(chat_id):
 def comprimir_conversacion(chat_id):
     if not necesita_compresion(chat_id):
         return None
-    historia = obtener_historia(chat_id, limite=6)  # ahora solo 3 intercambios
+    historia = obtener_historia(chat_id, limite=6)
     if len(historia) < 4:
         return None
     texto_historia = "\n".join([f"{h['role']}: {h['content']}" for h in historia])
@@ -312,7 +264,6 @@ def comprimir_conversacion(chat_id):
     try:
         respuesta = orquestador.consultar([{"role": "user", "content": prompt_compresor}], usar_busqueda=False)
         json_str = re.sub(r'```json|```', '', respuesta).strip()
-        # Validar que sea JSON válido antes de parsear
         if not json_str.startswith('{') or not json_str.endswith('}'):
             logger.warning(f"⚠️ Respuesta no es JSON: {json_str[:100]}...")
             return None
@@ -497,19 +448,15 @@ CIERRE: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con or
 # ==================== FUNCIONES AUXILIARES ====================
 
 def sanitizar_texto(texto):
-    """Limpia caracteres especiales y espacios extra"""
-    texto = re.sub(r'\s+', ' ', texto)  # Múltiples espacios -> uno
-    texto = re.sub(r'[^\w\s.,!?¿¡-]', '', texto)  # Caracteres no deseados
+    texto = re.sub(r'\s+', ' ', texto)
+    texto = re.sub(r'[^\w\s.,!?¿¡-]', '', texto)
     return texto.strip()
 
-# ========== NUEVO: DETECTOR DE SALUDOS CON RESPUESTAS POR HORA ==========
 def es_saludo(texto):
-    """Detecta saludos y devuelve respuesta predefinida según hora del día"""
     texto_limpio = re.sub(r'[.,!?¿¡]', '', texto.lower()).strip()
     saludos = ['hola', 'buenos días', 'buenas', 'hey', 'qué tal', 'que tal',
                'como estas', 'cómo estás', 'hi', 'hello', 'buenas tardes',
                'buenas noches', 'saludos', 'que onda', 'como va', 'epa', 'epale']
-    
     for s in saludos:
         if texto_limpio.startswith(s):
             hora = datetime.datetime.now().hour
@@ -519,52 +466,27 @@ def es_saludo(texto):
                 respuesta = "¡Buenas tardes, socio! Aquí Guaribe, pa' lo que necesite."
             else:
                 respuesta = "¡Buenas noches, mi guaribero! Guaribe al servicio. ¿Qué se le ofrece?"
-            # Variaciones aleatorias
             import random
-            variaciones = [
-                "¡Epale, mi llano! ",
-                "¡Ayala, pues! ",
-                "¡Qué más, mi pana! ",
-                "¡Saludos, mi gente! "
-            ]
+            variaciones = ["¡Epale, mi llano! ", "¡Ayala, pues! ", "¡Qué más, mi pana! ", "¡Saludos, mi gente! "]
             respuesta = random.choice(variaciones) + respuesta[0].lower() + respuesta[1:]
             return respuesta
     return None
 
-# ========== NUEVO: ROUTER DE CONSULTAS ==========
 def router_consulta(texto):
-    """
-    Clasifica la consulta y retorna: 'grok' (rápido) o 'deepseek' (complejo)
-    Reglas:
-    - Longitud < 80 y sin palabras clave complejas → Grok
-    - Palabras clave de análisis, política, guerra, por qué, cómo funciona → DeepSeek
-    - Preguntas sobre personas o eventos → DeepSeek (usa búsqueda)
-    - Si es ambiguo → Grok por defecto (más estable)
-    """
     texto_lower = texto.lower()
-    # Palabras clave que indican complejidad
     palabras_complejas = ['analiza', 'profundiza', 'guerra', 'política', 'política',
                           'por qué', 'cómo funciona', 'explica', 'detalla', 'contexto',
                           'historia', 'origen', 'consecuencias', 'impacto', 'geopolítica',
                           'bloqueo', 'ofac', 'swift', 'cognitiva', 'mediática']
-    
-    # Si es muy corta (< 80 caracteres) y no tiene palabras complejas → Grok
     if len(texto) < 80 and not any(p in texto_lower for p in palabras_complejas):
         return 'grok'
-    
-    # Si tiene palabras de complejidad → DeepSeek
     if any(p in texto_lower for p in palabras_complejas):
         return 'deepseek'
-    
-    # Preguntas sobre personas o eventos (requiere búsqueda web)
     if re.search(r'quién es|quien es|qué pasó|qué pasó|actualidad|noticias', texto_lower):
         return 'deepseek'
-    
-    # Por defecto, Grok (más estable)
     return 'grok'
 
 def es_pregunta_simple(texto):
-    """Determina si una pregunta es simple (operaciones, precios, corta)"""
     texto = texto.lower().strip()
     if len(texto.split()) < 5:
         return True
@@ -606,12 +528,6 @@ def detectar_tipo_creativo(texto):
 
 def detectar_accion(texto):
     texto = texto.lower()
-    if "enviar correo" in texto or "mandar email" in texto or "email a" in texto:
-        return "email"
-    if "guardar nota" in texto or "nota:" in texto or "apunta esto" in texto:
-        return "nota"
-    if "recordatorio" in texto or "recuérdame" in texto or "recordar" in texto:
-        return "recordatorio"
     if any(p in texto for p in ["crea", "genera", "dibuja", "haz", "quiero"]) and any(t in texto for t in ["imagen", "dibujo", "foto", "infografía", "logo"]):
         return "imagen"
     if "noticias" in texto or "qué pasó" in texto or "actualidad" in texto:
@@ -667,25 +583,6 @@ def generar_audio(texto):
         logger.error(f"❌ Error generando audio: {e}")
         return None
 
-def enviar_correo(destino, asunto, cuerpo):
-    if not EMAIL_USER or not EMAIL_PASSWORD:
-        return "⚠️ El servicio de correo no está configurado."
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_USER
-        msg['To'] = destino
-        msg['Subject'] = asunto
-        msg.attach(MIMEText(cuerpo, 'plain'))
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_USER, destino, msg.as_string())
-        server.quit()
-        return "✅ Correo enviado exitosamente."
-    except Exception as e:
-        logger.error(f"❌ Error enviando correo: {e}")
-        return f"❌ Error enviando correo: {str(e)[:100]}"
-
 def obtener_tasa():
     try:
         r = requests.get("https://ve.dolarapi.com/v1/dolares", timeout=10)
@@ -699,11 +596,7 @@ def obtener_tasa():
 
 def buscar_noticias():
     fuentes = [
-        ("Efecto Cocuyo", "https://efectococuyo.com/feed"),
-        ("Tal Cual", "https://talcualdigital.com/feed"),
         ("El Universal", "https://www.eluniversal.com/rss"),
-        ("El Nacional", "https://www.elnacional.com/rss"),
-        ("RunRun.es", "https://runrun.es/feed"),
         ("Noticiero Digital", "https://noticierodigital.com/feed"),
         ("VTV", "https://www.vtv.gob.ve/feed"),
         ("Correo del Orinoco", "https://www.correodelorinoco.gob.ve/feed"),
@@ -790,10 +683,6 @@ def cmd_start(m):
                     "Usa los botones:\n"
                     "💰 Tasa BCV\n📰 Noticias\n🔮 Analizar\n🎙️ Voz\n\n"
                     "🎨 Puedes pedirme imágenes, infografías o logos en lenguaje natural.\n"
-                    "📧 Dime 'enviar correo a ...' y te ayudaré.\n"
-                    "📝 Dime 'guarda nota: ...' o 'apunta esto'.\n"
-                    "⏰ Dime 'recordatorio ... para el ...' y te avisaré.\n"
-                    "🔮 Pregúntame por hipótesis o escenarios futuros.\n"
                     "📸 Envía fotos para que las analice.\n"
                     "🎙️ Envía mensajes de voz y te responderé.\n"
                     "👍/👎 Califica mis respuestas para que aprenda.\n"
@@ -933,7 +822,6 @@ def handle_buttons(m):
     if not texto:
         return
     
-    # Sanitizar texto
     texto = sanitizar_texto(texto)
     if len(texto) > 2000:
         bot.reply_to(m, "Mensaje demasiado largo (máximo 2000 caracteres).")
@@ -945,7 +833,7 @@ def handle_buttons(m):
         texto_lower = texto.lower()
         perfil = obtener_perfil(chat_id)
 
-        # --- PASO 1: DETECTAR NOMBRE (SOLO PRIMERA VEZ) ---
+        # --- PASO 1: DETECTAR NOMBRE ---
         if not perfil.get('nombre'):
             match = re.search(r'mi nombre es\s+(\w+)', texto_lower, re.IGNORECASE)
             if match:
@@ -955,17 +843,17 @@ def handle_buttons(m):
                 bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
                 return
 
-        # --- PASO 2: SALUDOS (RESPUESTA PREDEFINIDA SIN IA) ---
+        # --- PASO 2: SALUDOS ---
         respuesta_saludo = es_saludo(texto)
         if respuesta_saludo:
             bot.reply_to(m, respuesta_saludo)
             return
 
-        # --- PASO 3: ACTUALIZAR ESTADO DE ÁNIMO ---
+        # --- PASO 3: ESTADO DE ÁNIMO ---
         estado = detectar_estado_animo(texto)
         guardar_perfil(chat_id, estado_animo=estado)
 
-        # --- PASO 4: ACCIONES RÁPIDAS (TASA, NOTICIAS, IMAGEN, EMAIL, NOTA, RECORDATORIO) ---
+        # --- PASO 4: ACCIONES RÁPIDAS (TASA, NOTICIAS, IMAGEN) ---
         accion = detectar_accion(texto)
 
         if accion == "tasa":
@@ -992,58 +880,6 @@ def handle_buttons(m):
                 bot.reply_to(m, "❌ No pude generar la imagen.")
             return
 
-        if accion == "email":
-            try:
-                partes = texto.split("a ")[1] if "a " in texto else None
-                if not partes:
-                    bot.reply_to(m, "📧 Para enviar un correo, dime: 'enviar correo a correo@ejemplo.com asunto ...'")
-                    return
-                destino = partes.split(" ")[0]
-                resto = " ".join(partes.split(" ")[1:])
-                if " asunto " in resto:
-                    asunto = resto.split(" asunto ")[1].split(" cuerpo ")[0] if " cuerpo " in resto else resto.split(" asunto ")[1]
-                    cuerpo = resto.split(" cuerpo ")[1] if " cuerpo " in resto else ""
-                else:
-                    asunto = "Mensaje desde Guaribe"
-                    cuerpo = resto
-                bot.reply_to(m, "📧 Enviando correo...")
-                resultado = enviar_correo(destino, asunto, cuerpo)
-                bot.reply_to(m, resultado)
-            except Exception:
-                bot.reply_to(m, "❌ No entendí el correo. Usa: 'enviar correo a email@ejemplo.com asunto ...'")
-            return
-
-        if accion == "nota":
-            texto_nota = texto
-            for p in ["guardar nota", "nota:", "apunta esto"]:
-                texto_nota = texto_nota.replace(p, "").strip()
-            if not texto_nota:
-                bot.reply_to(m, "📝 Escribe algo para guardar: 'guarda nota: ...'")
-                return
-            resultado = guardar_nota(chat_id, texto_nota)
-            bot.reply_to(m, resultado)
-            return
-
-        if accion == "recordatorio":
-            try:
-                partes = texto.split(" para el ")
-                if len(partes) < 2:
-                    bot.reply_to(m, "⏰ Usa: 'recordatorio ... para el YYYY-MM-DD HH:MM'")
-                    return
-                texto_rec = partes[0].replace("recordatorio", "").replace("recuérdame", "").replace("recordar", "").strip()
-                fecha_str = partes[1].strip()
-                fecha_hora = datetime.datetime.strptime(fecha_str, "%Y-%m-%d %H:%M")
-                if fecha_hora < datetime.datetime.now():
-                    bot.reply_to(m, "⚠️ La fecha debe ser futura.")
-                    return
-                resultado = guardar_recordatorio(chat_id, texto_rec, fecha_hora)
-                bot.reply_to(m, resultado)
-            except ValueError:
-                bot.reply_to(m, "❌ Formato de fecha inválido. Usa: YYYY-MM-DD HH:MM")
-            except Exception as e:
-                bot.reply_to(m, f"❌ Error: {str(e)[:100]}")
-            return
-
         # --- PASO 5: BOTONES ESPECIALES ---
         if texto == "💰 Tasa BCV":
             bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
@@ -1062,7 +898,7 @@ def handle_buttons(m):
             bot.reply_to(m, f"🎙️ Preferencia de voz {estado_voz}.")
             return
 
-        # --- PASO 6: MODO ANÁLISIS (ACTIVADO POR BOTÓN) ---
+        # --- PASO 6: MODO ANÁLISIS ---
         if chat_id in modo_analisis and modo_analisis[chat_id]:
             modo_analisis[chat_id] = False
             tema = texto
@@ -1077,7 +913,7 @@ def handle_buttons(m):
             bot.reply_to(m, resp, parse_mode='Markdown')
             return
 
-        # --- PASO 7: TIPO CREATIVO (POESÍA, MANIFIESTO, PREDICCIÓN) ---
+        # --- PASO 7: TIPO CREATIVO ---
         tipo_creativo = detectar_tipo_creativo(texto)
         if tipo_creativo:
             if tipo_creativo == "poesia":
@@ -1108,29 +944,24 @@ def handle_buttons(m):
         # --- PASO 8: CONSULTA GENERAL CON ROUTER ---
         bot.reply_to(m, "⏳ Procesando tu solicitud...")
 
-        # Decidir qué modelo usar
         modelo = router_consulta(texto)
         logger.info(f"🔀 Router eligió: {modelo} para consulta: {texto[:30]}...")
 
         def tarea_pesada():
             try:
-                # Compresión de memoria en segundo plano
                 comprimir_conversacion_async(chat_id)
 
-                # Recuperar memorias relevantes
                 memorias = recuperar_memorias_relevantes(chat_id, texto)
                 contexto_memorias = ""
                 if memorias:
                     contexto_memorias = "\n[Recuerdos de Guaribe sobre ti]:\n" + "\n".join([f"- {m}" for m in memorias])
                     logger.info(f"🧠 Inyectando {len(memorias)} memorias")
 
-                # Buscar en documentos subidos
                 docs = buscar_conocimiento(chat_id, texto)
                 contexto_docs = ""
                 if docs:
                     contexto_docs = "\n\n[Documentos]\n" + "\n".join([f"'{d['nombre_archivo']}': {d['contenido'][:500]}" for d in docs])
 
-                # Contexto de personalidad
                 contexto_personalidad = ""
                 if perfil.get('nombre'):
                     contexto_personalidad += f"El usuario se llama {perfil['nombre']}. "
@@ -1147,17 +978,15 @@ def handle_buttons(m):
 
                 usar_busqueda = es_pregunta_sobre_persona(texto)
 
-                # Construir mensajes según el modelo elegido
                 if modelo == 'grok':
                     mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
                     resp = orquestador.consultar(mensajes, usar_busqueda=False)
-                else:  # deepseek
+                else:
                     mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
                     historia = obtener_historia(chat_id)
                     mensajes.extend(historia)
                     resp = orquestador.consultar(mensajes, usar_busqueda=usar_busqueda)
 
-                # Enviar respuesta final
                 sent_msg = bot.send_message(chat_id, resp)
                 markup = InlineKeyboardMarkup()
                 markup.add(
@@ -1166,7 +995,6 @@ def handle_buttons(m):
                 )
                 bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
 
-                # Audio si está activado
                 if perfil.get('preferencia_audio', False):
                     audio_data = generar_audio(resp)
                     if audio_data:
@@ -1209,12 +1037,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 9.0 Optimizado con Gevent"}), 200
-
-@app.route('/check_reminders', methods=['GET'])
-def check_reminders():
-    resultado = revisar_recordatorios()
-    return jsonify({"status": "ok", "result": resultado}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 9.0 - sin correos/notas/recordatorios"}), 200
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
