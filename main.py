@@ -32,8 +32,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")   # Su chat_id de Telegram
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET")     # Clave para el endpoint web
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -231,30 +231,16 @@ def necesita_compresion(chat_id):
                 cur.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s", (chat_id,))
                 return cur.fetchone()[0] > 50
 
-# ==================== COMPRESIÓN DE MEMORIA (MEJORADA) ====================
-def extraer_json_de_respuesta(respuesta):
-    """Intenta extraer un JSON válido de una respuesta que puede tener texto adicional."""
-    # Buscar algo que parezca un JSON (objeto o array)
-    match = re.search(r'\{[^{}]*\}', respuesta)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except:
-            pass
-    # Si no, intentar limpiar y parsear todo
-    try:
-        limpio = re.sub(r'```json|```', '', respuesta).strip()
-        return json.loads(limpio)
-    except:
-        return None
-
+# ==================== COMPRESIÓN DE MEMORIA ====================
 def comprimir_conversacion(chat_id):
     if not necesita_compresion(chat_id):
         return None
     historia = obtener_historia(chat_id, limite=6)
-    if len(historia) < 4:
+    # Filtrar mensajes irrelevantes antes de comprimir
+    historia_filtrada = [h for h in historia if not h['content'].startswith('/') and len(h['content']) > 3]
+    if len(historia_filtrada) < 4:
         return None
-    texto_historia = "\n".join([f"{h['role']}: {h['content']}" for h in historia])
+    texto_historia = "\n".join([f"{h['role']}: {h['content']}" for h in historia_filtrada])
     prompt_compresor = f"""
     Eres el archivista de Guaribe. Resume la siguiente conversación en una cápsula de memoria.
     Extrae los temas principales (máximo 3), el tono emocional, y los datos relevantes del usuario.
@@ -265,8 +251,13 @@ def comprimir_conversacion(chat_id):
     """
     try:
         respuesta = orquestador.consultar([{"role": "user", "content": prompt_compresor}], usar_busqueda=False)
-        datos = extraer_json_de_respuesta(respuesta)
-        if not datos or not datos.get('resumen') or not datos.get('temas'):
+        json_str = re.sub(r'```json|```', '', respuesta).strip()
+        # Validación extra: debe comenzar con { y terminar con }
+        if not json_str.startswith('{') or not json_str.endswith('}'):
+            logger.warning(f"⚠️ Respuesta no es JSON válido: {json_str[:100]}...")
+            return None
+        datos = json.loads(json_str)
+        if not datos.get('resumen') or not datos.get('temas'):
             logger.warning("⚠️ JSON incompleto en compresión")
             return None
         with get_connection() as conn:
@@ -278,6 +269,9 @@ def comprimir_conversacion(chat_id):
                 conn.commit()
                 logger.info(f"🧠 Memoria comprimida para {chat_id}: {datos['temas']}")
         return datos
+    except json.JSONDecodeError:
+        logger.warning(f"⚠️ La respuesta del compresor no es JSON válido: {respuesta[:200]}...")
+        return None
     except Exception as e:
         logger.warning(f"⚠️ Error comprimiendo memoria (no crítico): {e}")
         return None
@@ -503,12 +497,16 @@ def sanitizar_texto(texto):
     return texto.strip()
 
 def es_saludo(texto):
-    texto_limpio = re.sub(r'[.,!?¿¡]', '', texto.lower()).strip()
+    """Detecta saludos y devuelve respuesta predefinida"""
+    # Normalizar: eliminar espacios, signos y convertir a minúsculas
+    texto_limpio = re.sub(r'[.,!?¿¡\s]+', ' ', texto.lower()).strip()
+    # Lista de saludos (incluyendo variantes)
     saludos = ['hola', 'buenos días', 'buenas', 'hey', 'qué tal', 'que tal',
                'como estas', 'cómo estás', 'hi', 'hello', 'buenas tardes',
                'buenas noches', 'saludos', 'que onda', 'como va', 'epa', 'epale']
+    # Verificar si el texto comienza con alguno de los saludos
     for s in saludos:
-        if texto_limpio.startswith(s):
+        if texto_limpio.startswith(s) or texto_limpio == s:
             hora = datetime.datetime.now().hour
             if 6 <= hora < 12:
                 respuesta = "¡Buenos días, mi pana! Soy Guaribe, su asistente llanero. ¿En qué lo ayudo hoy?"
@@ -740,39 +738,53 @@ def cmd_start(m):
                     "¡Seguimos razonando! 🇻🇪🤠🏛️",
                     parse_mode='Markdown', reply_markup=menu_principal())
 
-# ==================== COMANDO DE ADMINISTRACIÓN (CORREGIDO) ====================
+# ==================== COMANDO DE ADMINISTRACIÓN MEJORADO ====================
 @bot.message_handler(commands=['admin_clean'])
 def cmd_admin_clean(m):
     chat_id_actual = str(m.chat.id)
     admin_id_configurado = ADMIN_CHAT_ID or "No configurado"
     
-    # Si no coincide, mostrar mensaje de depuración
+    logger.info(f"🔐 Comando /admin_clean ejecutado por chat_id: {chat_id_actual} (admin configurado: {admin_id_configurado})")
+    
     if chat_id_actual != admin_id_configurado:
-        bot.reply_to(m, f"⛔ No autorizado.\n\nTu chat_id: `{chat_id_actual}`\nAdmin configurado: `{admin_id_configurado}`\n\nCorrige la variable `ADMIN_CHAT_ID` en Render y redeploya.", parse_mode='Markdown')
+        msg = f"⛔ No autorizado.\n\nTu chat_id: `{chat_id_actual}`\nAdmin configurado: `{admin_id_configurado}`\n\nCorrige la variable `ADMIN_CHAT_ID` en Render y redeploya."
+        bot.reply_to(m, msg, parse_mode='Markdown')
+        logger.warning(f"⚠️ Intento no autorizado de /admin_clean desde {chat_id_actual}")
         return
     
-    # Si coincide, proceder con la limpieza
-    bot.reply_to(m, "🧹 Limpiando base de datos...")
+    bot.reply_to(m, "🧹 Limpiando base de datos... (esto puede tomar unos segundos)")
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Borrar solo URLs de conocimiento
+                # 1. Borrar URLs de conocimiento
                 cur.execute("DELETE FROM conocimiento WHERE nombre_archivo LIKE 'http%' OR contenido LIKE '%http%';")
-                # Borrar mensajes cortos y saludos de conversaciones
+                docs_borrados = cur.rowcount
+                
+                # 2. Borrar mensajes cortos y saludos de conversaciones
                 cur.execute("""
                     DELETE FROM conversaciones 
                     WHERE LENGTH(mensaje) < 3 
-                    OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 'como estas', 'buenas', 'hey', 'epa', 'epale', 'Buenos días', 'Buenas tardes', 'Buenas noches');
+                    OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 
+                                  'como estas', 'buenas', 'hey', 'epa', 'epale', 'Buenos días', 'Buenas tardes', 
+                                  'Buenas noches', 'Saludos', 'saludos', 'hola');
                 """)
+                conv_borrados = cur.rowcount
                 conn.commit()
                 
-                # Contar lo que queda
+                # 3. Contar lo que queda
                 cur.execute("SELECT COUNT(*) FROM conocimiento;")
                 count_docs = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM conversaciones;")
                 count_conv = cur.fetchone()[0]
                 
-                bot.reply_to(m, f"✅ Base de datos limpiada:\n- conocimiento: {count_docs} registros (solo URLs eliminadas)\n- conversaciones: {count_conv} registros (ruido eliminado)")
+                msg = f"✅ Base de datos limpiada:\n" \
+                      f"- URLs eliminadas de conocimiento: {docs_borrados}\n" \
+                      f"- Mensajes cortos/saludos eliminados: {conv_borrados}\n" \
+                      f"- conocimiento ahora tiene {count_docs} registros\n" \
+                      f"- conversaciones ahora tiene {count_conv} registros"
+                bot.reply_to(m, msg)
+                logger.info(f"✅ Limpieza completada: {docs_borrados} URLs, {conv_borrados} mensajes")
+                
     except Exception as e:
         logger.error(f"❌ Error en /admin_clean: {e}")
         bot.reply_to(m, f"❌ Error: {e}")
@@ -910,11 +922,6 @@ def handle_buttons(m):
     if not texto:
         return
     
-    # Ignorar comandos (los que empiezan con /) para que no pasen por el router
-    if texto.startswith('/'):
-        logger.info(f"⏭️ Ignorando comando en handler principal: {texto}")
-        return
-    
     texto = sanitizar_texto(texto)
     if len(texto) > 2000:
         bot.reply_to(m, "Mensaje demasiado largo (máximo 2000 caracteres).")
@@ -926,6 +933,12 @@ def handle_buttons(m):
         texto_lower = texto.lower()
         perfil = obtener_perfil(chat_id)
 
+        # --- PASO 0: FILTRAR COMANDOS Y MENSAJES IRRELEVANTES ---
+        if texto.startswith('/') or len(texto) < 2:
+            # Ignorar comandos y mensajes vacíos
+            logger.info(f"⏭️ Ignorando comando o mensaje corto: {texto}")
+            return
+
         # --- PASO 1: DETECTAR NOMBRE ---
         if not perfil.get('nombre'):
             match = re.search(r'mi nombre es\s+(\w+)', texto_lower, re.IGNORECASE)
@@ -936,7 +949,7 @@ def handle_buttons(m):
                 bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
                 return
 
-        # --- PASO 2: SALUDOS ---
+        # --- PASO 2: SALUDOS (MEJORADO) ---
         respuesta_saludo = es_saludo(texto)
         if respuesta_saludo:
             bot.reply_to(m, respuesta_saludo)
@@ -1142,7 +1155,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe 9.3 - con limpieza selectiva y depuración"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe 9.4 - con mejoras en filtros y limpieza"}), 200
 
 @app.route('/admin/clean', methods=['GET'])
 def admin_clean():
@@ -1156,7 +1169,9 @@ def admin_clean():
                 cur.execute("""
                     DELETE FROM conversaciones 
                     WHERE LENGTH(mensaje) < 3 
-                    OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 'como estas', 'buenas', 'hey', 'epa', 'epale', 'Buenos días', 'Buenas tardes', 'Buenas noches');
+                    OR mensaje IN ('Hola', 'hola', '/star', 'Oye tiempo que no te escribia', 'Cómo estás pana', 
+                                  'como estas', 'buenas', 'hey', 'epa', 'epale', 'Buenos días', 'Buenas tardes', 
+                                  'Buenas noches', 'Saludos', 'saludos', 'hola');
                 """)
                 conn.commit()
                 return jsonify({"status": "ok", "message": "Base de datos limpiada (solo URLs y ruido)"})
@@ -1176,7 +1191,7 @@ def set_webhook():
 
 # ==================== CONFIGURACIÓN DEL WEBHOOK AL INICIAR ====================
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Guaribe 9.3 en modo desarrollo...")
+    logger.info("🚀 Iniciando Guaribe 9.4 en modo desarrollo...")
     init_db()
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
@@ -1186,7 +1201,7 @@ if __name__ == "__main__":
     app.run(host='0.0.0.0', port=port)
 else:
     if os.environ.get('WEBHOOK_SET') != 'true':
-        logger.info("🚀 Iniciando Guaribe 9.3 en modo producción (Gevent)...")
+        logger.info("🚀 Iniciando Guaribe 9.4 en modo producción (Gevent)...")
         init_db()
         webhook_url = f"https://guaribe-beta.onrender.com/webhook"
         for i in range(5):
