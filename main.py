@@ -61,7 +61,6 @@ _cache_tasa = {"data": None, "timestamp": None}
 def init_db():
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # --- TABLAS ---
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS conversaciones (
                     id SERIAL PRIMARY KEY,
@@ -134,7 +133,6 @@ def init_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_feedback_chat ON feedback (chat_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_conocimiento_contenido_trgm ON conocimiento USING gin (contenido gin_trgm_ops);")
 
-            # --- MIGRACIÓN: agregar columna preferencia_audio si no existe ---
             cur.execute("""
                 DO $$
                 BEGIN
@@ -276,7 +274,7 @@ def necesita_compresion(chat_id):
                 cur.execute("SELECT COUNT(*) FROM conversaciones WHERE chat_id = %s", (chat_id,))
                 return cur.fetchone()[0] > 50
 
-# ==================== MEJORA: comprimir_conversacion con fallback y mejor manejo ====================
+# ==================== COMPRESIÓN DE MEMORIA ====================
 def comprimir_conversacion(chat_id):
     if not necesita_compresion(chat_id):
         return None
@@ -293,11 +291,16 @@ def comprimir_conversacion(chat_id):
     {{"resumen": "texto conciso de 100 palabras máximo", "temas": ["tema1", "tema2", "tema3"]}}
     """
     try:
-        # Usamos orquestador.consultar (fallback a Groq si DeepSeek falla)
         respuesta = orquestador.consultar([{"role": "user", "content": prompt_compresor}], usar_busqueda=False)
-        # Limpiar posibles marcadores markdown
         json_str = re.sub(r'```json|```', '', respuesta).strip()
+        # Validar que sea JSON válido antes de parsear
+        if not json_str.startswith('{') or not json_str.endswith('}'):
+            logger.warning(f"⚠️ Respuesta no es JSON: {json_str[:100]}...")
+            return None
         datos = json.loads(json_str)
+        if not datos.get('resumen') or not datos.get('temas'):
+            logger.warning("⚠️ JSON incompleto en compresión")
+            return None
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -307,7 +310,7 @@ def comprimir_conversacion(chat_id):
                 conn.commit()
                 logger.info(f"🧠 Memoria comprimida para {chat_id}: {datos['temas']}")
         return datos
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         logger.warning(f"⚠️ La respuesta del compresor no es JSON válido: {respuesta[:200]}...")
         return None
     except Exception as e:
@@ -334,14 +337,14 @@ def recuperar_memorias_relevantes(chat_id, consulta):
             Si ninguna es relevante, devuelve "NINGUNA".
             Formato de respuesta: "1, 3, 5"
             """
-            respuesta = orquestador._consultar_deepseek([{"role": "user", "content": prompt_selector}])
+            respuesta = orquestador.consultar([{"role": "user", "content": prompt_selector}], usar_busqueda=False)
             if "NINGUNA" in respuesta:
                 return []
             indices = [int(x.strip()) for x in respuesta.split(',') if x.strip().isdigit()]
             relevantes = [registros[i-1] for i in indices if 0 < i <= len(registros)]
             return [r['resumen'] for r in relevantes]
 
-# ==================== ORQUESTADOR (Groq + DeepSeek) ====================
+# ==================== ORQUESTADOR ====================
 class Orquestador:
     def __init__(self):
         self.modelos = []
@@ -473,15 +476,40 @@ CIERRE: "Soy Guaribe, tu asistente de IA venezolana. ¡Seguimos razonando con or
 """
 
 # ==================== FUNCIONES AUXILIARES ====================
+
+def sanitizar_texto(texto):
+    """Limpia caracteres especiales y espacios extra"""
+    texto = re.sub(r'\s+', ' ', texto)  # Múltiples espacios -> uno
+    texto = re.sub(r'[^\w\s.,!?¿¡-]', '', texto)  # Caracteres no deseados
+    return texto.strip()
+
+def es_saludo(texto):
+    """Detecta saludos simples con prioridad máxima"""
+    # Limpiar texto para comparación
+    texto_limpio = texto.lower().strip()
+    # Eliminar signos de puntuación
+    texto_limpio = re.sub(r'[.,!?¿¡]', '', texto_limpio)
+    
+    saludos = [
+        'hola', 'buenos días', 'buenas', 'hey', 'qué tal', 'que tal',
+        'como estas', 'cómo estás', 'hi', 'hello', 'buenas tardes',
+        'buenas noches', 'saludos', 'que onda', 'como va'
+    ]
+    
+    # Coincidencia exacta o que comience con el saludo (para "hola cómo estás")
+    for s in saludos:
+        if texto_limpio == s or texto_limpio.startswith(s):
+            return True
+    return False
+
 def es_pregunta_simple(texto):
-    texto = texto.lower()
-    if texto in ["hola", "buenos días", "buenas", "hey", "qué tal", "como estás"]:
+    """Determina si una pregunta es simple (operaciones, precios, corta)"""
+    texto = texto.lower().strip()
+    if len(texto.split()) < 5:
         return True
     if any(p in texto for p in ["+", "-", "*", "/", "por", "entre", "más", "menos", "cuánto", "cuanto"]):
         return True
     if any(p in texto for p in ["precio", "tasa", "dólar", "dolar", "bcv"]):
-        return True
-    if len(texto.split()) < 5:
         return True
     return False
 
@@ -515,7 +543,6 @@ def detectar_tipo_creativo(texto):
         return "prediccion"
     return None
 
-# ==================== MEJORA: detectar_accion con más frases para tasa ====================
 def detectar_accion(texto):
     texto = texto.lower()
     if "enviar correo" in texto or "mandar email" in texto or "email a" in texto:
@@ -528,7 +555,6 @@ def detectar_accion(texto):
         return "imagen"
     if "noticias" in texto or "qué pasó" in texto or "actualidad" in texto:
         return "noticias"
-    # MEJORA: detectar preguntas sobre tasa/dólar
     if any(p in texto for p in ["tasa", "dólar", "dolar", "bcv", "cambio", "precio del dólar", "valor del dólar", "cuánto está el dólar", "precio del dolar", "cuánto cuesta el dólar"]):
         return "tasa"
     return None
@@ -845,6 +871,9 @@ def handle_buttons(m):
     texto = m.text if hasattr(m, 'text') else ""
     if not texto:
         return
+    
+    # Sanitizar texto
+    texto = sanitizar_texto(texto)
     if len(texto) > 2000:
         bot.reply_to(m, "Mensaje demasiado largo (máximo 2000 caracteres).")
         return
@@ -855,24 +884,46 @@ def handle_buttons(m):
         texto_lower = texto.lower()
         perfil = obtener_perfil(chat_id)
 
-        # Detectar nombre
+        # --- PASO 1: DETECTAR NOMBRE (SOLO PRIMERA VEZ) ---
         if not perfil.get('nombre'):
-            if "mi nombre es" in texto_lower:
-                partes = texto.split("mi nombre es")
-                if len(partes) > 1:
-                    nombre_detectado = partes[1].strip().split()[0]
-                    guardar_perfil(chat_id, nombre=nombre_detectado)
-                    perfil = obtener_perfil(chat_id)
-                    bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
-                    return
+            match = re.search(r'mi nombre es\s+(\w+)', texto_lower, re.IGNORECASE)
+            if match:
+                nombre_detectado = match.group(1)
+                guardar_perfil(chat_id, nombre=nombre_detectado)
+                perfil = obtener_perfil(chat_id)
+                bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
+                return
 
-        # Estado de ánimo
+        # --- PASO 2: SALUDOS (RESPUESTA DIRECTA SIN IA) ---
+        if es_saludo(texto):
+            # Usar caché de respuestas para saludos comunes
+            saludo_cache = {
+                'hola': '¡Hola! Soy Guaribe, tu asistente venezolano. ¿En qué puedo ayudarte?',
+                'buenos días': '¡Buenos días! Soy Guaribe. ¿Cómo puedo ayudarte hoy?',
+                'buenas': '¡Buenas! ¿Qué tal? Soy Guaribe, para servirte.',
+                'buenas tardes': '¡Buenas tardes! Soy Guaribe. ¿En qué te puedo ayudar?',
+                'buenas noches': '¡Buenas noches! Soy Guaribe, tu asistente. ¿Qué necesitas?',
+                'hola como estas': '¡Hola! Estoy bien, gracias por preguntar. ¿Y tú? ¿En qué puedo ayudarte?'
+            }
+            
+            # Buscar coincidencia exacta o parcial
+            texto_limpio = re.sub(r'[.,!?¿¡]', '', texto_lower).strip()
+            for key, resp in saludo_cache.items():
+                if texto_limpio.startswith(key):
+                    bot.reply_to(m, resp)
+                    return
+            
+            # Respuesta genérica si no coincide con ninguna
+            bot.reply_to(m, "¡Hola! Soy Guaribe, tu asistente venezolano. ¿En qué puedo ayudarte?")
+            return
+
+        # --- PASO 3: ACTUALIZAR ESTADO DE ÁNIMO ---
         estado = detectar_estado_animo(texto)
         guardar_perfil(chat_id, estado_animo=estado)
 
+        # --- PASO 4: ACCIONES RÁPIDAS (TASA, NOTICIAS, IMAGEN, EMAIL, NOTA, RECORDATORIO) ---
         accion = detectar_accion(texto)
 
-        # ---- ACCIONES RÁPIDAS ----
         if accion == "tasa":
             bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
             return
@@ -949,7 +1000,7 @@ def handle_buttons(m):
                 bot.reply_to(m, f"❌ Error: {str(e)[:100]}")
             return
 
-        # Botones especiales
+        # --- PASO 5: BOTONES ESPECIALES ---
         if texto == "💰 Tasa BCV":
             bot.reply_to(m, f"{obtener_tasa_cache()}\n\nSoy Guaribe...", parse_mode='Markdown')
             return
@@ -967,7 +1018,7 @@ def handle_buttons(m):
             bot.reply_to(m, f"🎙️ Preferencia de voz {estado_voz}.")
             return
 
-        # Modo análisis
+        # --- PASO 6: MODO ANÁLISIS (ACTIVADO POR BOTÓN) ---
         if chat_id in modo_analisis and modo_analisis[chat_id]:
             modo_analisis[chat_id] = False
             tema = texto
@@ -982,7 +1033,7 @@ def handle_buttons(m):
             bot.reply_to(m, resp, parse_mode='Markdown')
             return
 
-        # Tipo creativo
+        # --- PASO 7: TIPO CREATIVO (POESÍA, MANIFIESTO, PREDICCIÓN) ---
         tipo_creativo = detectar_tipo_creativo(texto)
         if tipo_creativo:
             if tipo_creativo == "poesia":
@@ -1010,23 +1061,28 @@ def handle_buttons(m):
             bot.reply_to(m, resp)
             return
 
-        # ---- CONSULTA GENERAL (PESADA) ----
+        # --- PASO 8: CONSULTA GENERAL (PESADA) ---
         bot.reply_to(m, "⏳ Procesando tu solicitud...")
 
         def tarea_pesada():
             try:
+                # Compresión de memoria en segundo plano
                 comprimir_conversacion_async(chat_id)
+
+                # Recuperar memorias relevantes
                 memorias = recuperar_memorias_relevantes(chat_id, texto)
                 contexto_memorias = ""
                 if memorias:
                     contexto_memorias = "\n[Recuerdos de Guaribe sobre ti]:\n" + "\n".join([f"- {m}" for m in memorias])
                     logger.info(f"🧠 Inyectando {len(memorias)} memorias")
 
+                # Buscar en documentos subidos
                 docs = buscar_conocimiento(chat_id, texto)
                 contexto_docs = ""
                 if docs:
                     contexto_docs = "\n\n[Documentos]\n" + "\n".join([f"'{d['nombre_archivo']}': {d['contenido'][:500]}" for d in docs])
 
+                # Contexto de personalidad
                 contexto_personalidad = ""
                 if perfil.get('nombre'):
                     contexto_personalidad += f"El usuario se llama {perfil['nombre']}. "
@@ -1043,6 +1099,7 @@ def handle_buttons(m):
 
                 usar_busqueda = es_pregunta_sobre_persona(texto)
 
+                # Decidir qué prompt usar
                 if es_pregunta_simple(texto):
                     mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
                     resp = orquestador.consultar(mensajes, usar_busqueda=False)
@@ -1052,6 +1109,7 @@ def handle_buttons(m):
                     mensajes.extend(historia)
                     resp = orquestador.consultar(mensajes, usar_busqueda=usar_busqueda)
 
+                # Enviar respuesta final
                 sent_msg = bot.send_message(chat_id, resp)
                 markup = InlineKeyboardMarkup()
                 markup.add(
@@ -1060,6 +1118,7 @@ def handle_buttons(m):
                 )
                 bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
 
+                # Audio si está activado
                 if perfil.get('preferencia_audio', False):
                     audio_data = generar_audio(resp)
                     if audio_data:
