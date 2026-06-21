@@ -171,13 +171,32 @@ def obtener_perfil(chat_id):
             perfil = cur.fetchone()
             return perfil if perfil else {'chat_id': chat_id, 'estilo': 'conversacional', 'preferencia_audio': False}
 
+# === NUEVO: guardar mensaje con límite de 3 intercambios y try/except ===
 def guardar_mensaje(chat_id, rol, mensaje):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO conversaciones (chat_id, rol, mensaje) VALUES (%s, %s, %s)", (chat_id, rol, mensaje))
-            conn.commit()
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Insertar el nuevo mensaje
+                cur.execute(
+                    "INSERT INTO conversaciones (chat_id, rol, mensaje) VALUES (%s, %s, %s)",
+                    (chat_id, rol, mensaje)
+                )
+                # Eliminar los mensajes más antiguos hasta dejar solo los últimos 6 (3 intercambios usuario-asistente)
+                cur.execute("""
+                    DELETE FROM conversaciones 
+                    WHERE id IN (
+                        SELECT id FROM conversaciones 
+                        WHERE chat_id = %s 
+                        ORDER BY timestamp DESC 
+                        OFFSET 6
+                    )
+                """, (chat_id,))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Error guardando mensaje en DB (no crítico): {e}")
+        # No lanzamos excepción para que el bot no falle
 
-def obtener_historia(chat_id, limite=10):
+def obtener_historia(chat_id, limite=6):
     with get_connection() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
@@ -278,7 +297,7 @@ def necesita_compresion(chat_id):
 def comprimir_conversacion(chat_id):
     if not necesita_compresion(chat_id):
         return None
-    historia = obtener_historia(chat_id, limite=15)
+    historia = obtener_historia(chat_id, limite=6)  # ahora solo 3 intercambios
     if len(historia) < 4:
         return None
     texto_historia = "\n".join([f"{h['role']}: {h['content']}" for h in historia])
@@ -483,24 +502,66 @@ def sanitizar_texto(texto):
     texto = re.sub(r'[^\w\s.,!?¿¡-]', '', texto)  # Caracteres no deseados
     return texto.strip()
 
+# ========== NUEVO: DETECTOR DE SALUDOS CON RESPUESTAS POR HORA ==========
 def es_saludo(texto):
-    """Detecta saludos simples con prioridad máxima"""
-    # Limpiar texto para comparación
-    texto_limpio = texto.lower().strip()
-    # Eliminar signos de puntuación
-    texto_limpio = re.sub(r'[.,!?¿¡]', '', texto_limpio)
+    """Detecta saludos y devuelve respuesta predefinida según hora del día"""
+    texto_limpio = re.sub(r'[.,!?¿¡]', '', texto.lower()).strip()
+    saludos = ['hola', 'buenos días', 'buenas', 'hey', 'qué tal', 'que tal',
+               'como estas', 'cómo estás', 'hi', 'hello', 'buenas tardes',
+               'buenas noches', 'saludos', 'que onda', 'como va', 'epa', 'epale']
     
-    saludos = [
-        'hola', 'buenos días', 'buenas', 'hey', 'qué tal', 'que tal',
-        'como estas', 'cómo estás', 'hi', 'hello', 'buenas tardes',
-        'buenas noches', 'saludos', 'que onda', 'como va'
-    ]
-    
-    # Coincidencia exacta o que comience con el saludo (para "hola cómo estás")
     for s in saludos:
-        if texto_limpio == s or texto_limpio.startswith(s):
-            return True
-    return False
+        if texto_limpio.startswith(s):
+            hora = datetime.datetime.now().hour
+            if 6 <= hora < 12:
+                respuesta = "¡Buenos días, mi pana! Soy Guaribe, su asistente llanero. ¿En qué lo ayudo hoy?"
+            elif 12 <= hora < 18:
+                respuesta = "¡Buenas tardes, socio! Aquí Guaribe, pa' lo que necesite."
+            else:
+                respuesta = "¡Buenas noches, mi guaribero! Guaribe al servicio. ¿Qué se le ofrece?"
+            # Variaciones aleatorias
+            import random
+            variaciones = [
+                "¡Epale, mi llano! ",
+                "¡Ayala, pues! ",
+                "¡Qué más, mi pana! ",
+                "¡Saludos, mi gente! "
+            ]
+            respuesta = random.choice(variaciones) + respuesta[0].lower() + respuesta[1:]
+            return respuesta
+    return None
+
+# ========== NUEVO: ROUTER DE CONSULTAS ==========
+def router_consulta(texto):
+    """
+    Clasifica la consulta y retorna: 'grok' (rápido) o 'deepseek' (complejo)
+    Reglas:
+    - Longitud < 80 y sin palabras clave complejas → Grok
+    - Palabras clave de análisis, política, guerra, por qué, cómo funciona → DeepSeek
+    - Preguntas sobre personas o eventos → DeepSeek (usa búsqueda)
+    - Si es ambiguo → Grok por defecto (más estable)
+    """
+    texto_lower = texto.lower()
+    # Palabras clave que indican complejidad
+    palabras_complejas = ['analiza', 'profundiza', 'guerra', 'política', 'política',
+                          'por qué', 'cómo funciona', 'explica', 'detalla', 'contexto',
+                          'historia', 'origen', 'consecuencias', 'impacto', 'geopolítica',
+                          'bloqueo', 'ofac', 'swift', 'cognitiva', 'mediática']
+    
+    # Si es muy corta (< 80 caracteres) y no tiene palabras complejas → Grok
+    if len(texto) < 80 and not any(p in texto_lower for p in palabras_complejas):
+        return 'grok'
+    
+    # Si tiene palabras de complejidad → DeepSeek
+    if any(p in texto_lower for p in palabras_complejas):
+        return 'deepseek'
+    
+    # Preguntas sobre personas o eventos (requiere búsqueda web)
+    if re.search(r'quién es|quien es|qué pasó|qué pasó|actualidad|noticias', texto_lower):
+        return 'deepseek'
+    
+    # Por defecto, Grok (más estable)
+    return 'grok'
 
 def es_pregunta_simple(texto):
     """Determina si una pregunta es simple (operaciones, precios, corta)"""
@@ -894,27 +955,10 @@ def handle_buttons(m):
                 bot.reply_to(m, f"✅ ¡Listo, {nombre_detectado}! Recordaré tu nombre.")
                 return
 
-        # --- PASO 2: SALUDOS (RESPUESTA DIRECTA SIN IA) ---
-        if es_saludo(texto):
-            # Usar caché de respuestas para saludos comunes
-            saludo_cache = {
-                'hola': '¡Hola! Soy Guaribe, tu asistente venezolano. ¿En qué puedo ayudarte?',
-                'buenos días': '¡Buenos días! Soy Guaribe. ¿Cómo puedo ayudarte hoy?',
-                'buenas': '¡Buenas! ¿Qué tal? Soy Guaribe, para servirte.',
-                'buenas tardes': '¡Buenas tardes! Soy Guaribe. ¿En qué te puedo ayudar?',
-                'buenas noches': '¡Buenas noches! Soy Guaribe, tu asistente. ¿Qué necesitas?',
-                'hola como estas': '¡Hola! Estoy bien, gracias por preguntar. ¿Y tú? ¿En qué puedo ayudarte?'
-            }
-            
-            # Buscar coincidencia exacta o parcial
-            texto_limpio = re.sub(r'[.,!?¿¡]', '', texto_lower).strip()
-            for key, resp in saludo_cache.items():
-                if texto_limpio.startswith(key):
-                    bot.reply_to(m, resp)
-                    return
-            
-            # Respuesta genérica si no coincide con ninguna
-            bot.reply_to(m, "¡Hola! Soy Guaribe, tu asistente venezolano. ¿En qué puedo ayudarte?")
+        # --- PASO 2: SALUDOS (RESPUESTA PREDEFINIDA SIN IA) ---
+        respuesta_saludo = es_saludo(texto)
+        if respuesta_saludo:
+            bot.reply_to(m, respuesta_saludo)
             return
 
         # --- PASO 3: ACTUALIZAR ESTADO DE ÁNIMO ---
@@ -1061,8 +1105,12 @@ def handle_buttons(m):
             bot.reply_to(m, resp)
             return
 
-        # --- PASO 8: CONSULTA GENERAL (PESADA) ---
+        # --- PASO 8: CONSULTA GENERAL CON ROUTER ---
         bot.reply_to(m, "⏳ Procesando tu solicitud...")
+
+        # Decidir qué modelo usar
+        modelo = router_consulta(texto)
+        logger.info(f"🔀 Router eligió: {modelo} para consulta: {texto[:30]}...")
 
         def tarea_pesada():
             try:
@@ -1099,11 +1147,11 @@ def handle_buttons(m):
 
                 usar_busqueda = es_pregunta_sobre_persona(texto)
 
-                # Decidir qué prompt usar
-                if es_pregunta_simple(texto):
+                # Construir mensajes según el modelo elegido
+                if modelo == 'grok':
                     mensajes = [{"role": "system", "content": PROMPT_SIMPLE + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
                     resp = orquestador.consultar(mensajes, usar_busqueda=False)
-                else:
+                else:  # deepseek
                     mensajes = [{"role": "system", "content": SYSTEM_PROMPT + contexto_docs + "\n\n" + contexto_personalidad + contexto_memorias}]
                     historia = obtener_historia(chat_id)
                     mensajes.extend(historia)
