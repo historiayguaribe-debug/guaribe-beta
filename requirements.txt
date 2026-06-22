@@ -1,4 +1,5 @@
 gevent==24.2.1
+flask==3.0.3
 telebot==0.0.5
 requests==2.32.3
 psycopg2-binary==2.9.9
@@ -8,5 +9,5 @@ beautifulsoup4==4.12.3
 Pillow==10.3.0
 gTTS==2.5.1
 groq==0.9.0
-Flask==3.0.3
 numpy==1.26.4
+gunicorn==21.2.0
