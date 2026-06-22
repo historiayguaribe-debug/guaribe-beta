@@ -11,6 +11,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    logger.error("❌ TELEGRAM_TOKEN no configurado")
+    raise ValueError("TELEGRAM_TOKEN es obligatorio")
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 # ==================== HANDLERS ====================
@@ -47,23 +51,24 @@ def home():
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
-    url = f"https://guaribe-beta.onrender.com/webhook"
+    webhook_url = f"https://guaribe-beta.onrender.com/webhook"
     try:
         bot.remove_webhook()
         time.sleep(0.5)
-        bot.set_webhook(url=url)
-        return jsonify({"status": "ok", "message": f"Webhook configurado en {url}"}), 200
+        bot.set_webhook(url=webhook_url)
+        return jsonify({"status": "ok", "message": f"Webhook configurado en {webhook_url}"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ==================== EJECUCIÓN ====================
 if __name__ == "__main__":
+    logger.info("🚀 Iniciando Guaribe en modo desarrollo...")
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f"https://guaribe-beta.onrender.com/webhook")
     app.run(host='0.0.0.0', port=port)
 else:
-    bot.remove_webhook()
-    time.sleep(1)
-    bot.set_webhook(url=f"https://guaribe-beta.onrender.com/webhook")
-    logger.info("✅ Webhook configurado en producción")
+    # En producción con gunicorn, NO configuramos el webhook aquí.
+    # Se configura desde el endpoint /set_webhook o manualmente.
+    logger.info("✅ Servidor listo para recibir peticiones (webhook debe configurarse desde /set_webhook)")
