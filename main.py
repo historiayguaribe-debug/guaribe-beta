@@ -9,11 +9,10 @@ import threading
 from flask import Flask, request, jsonify
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, guardar_resumen
+from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, guardar_resumen, get_connection
 from core.classifier import clasificador
 from core.orchestrator import orquestar
 from core.strategist import estratega
-from core.personality import obtener_prompt
 from utils.web import obtener_tasa, buscar_noticias, buscar_en_web
 from utils.media import generar_imagen, generar_audio, transcribir_audio
 
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ==================== CONFIGURACIÓN ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # Tu chat_id
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 modo_analisis = {}
@@ -61,7 +60,6 @@ def cmd_admin_clean(m):
         return
     bot.send_message(m.chat.id, "🧹 Limpiando base de datos...")
     try:
-        from core.memory import get_connection
         conn = get_connection()
         with conn.cursor() as cur:
             cur.execute("DELETE FROM mensajes;")
@@ -71,6 +69,80 @@ def cmd_admin_clean(m):
     except Exception as e:
         bot.send_message(m.chat.id, f"❌ Error: {e}")
 
+# ==================== COMANDO /status ====================
+@bot.message_handler(commands=['status'])
+def cmd_status(m):
+    chat_id = m.chat.id
+    
+    if str(chat_id) != ADMIN_CHAT_ID:
+        bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
+        return
+    
+    bot.send_message(chat_id, "🔍 Verificando estructura del bot...")
+    
+    mensaje = "📁 *ESTRUCTURA DE GUARIBE BETA*\n\n"
+    
+    # 1. Verificar archivos y carpetas
+    archivos_requeridos = [
+        ("main.py", "✅"),
+        ("core/memory.py", "✅"),
+        ("utils/__init__.py", "✅"),
+        ("utils/web.py", "✅"),
+        ("utils/media.py", "✅"),
+        ("requirements.txt", "✅"),
+    ]
+    
+    mensaje += "*Archivos y carpetas:*\n"
+    todos_ok = True
+    for archivo, icono in archivos_requeridos:
+        existe = os.path.exists(archivo)
+        if existe:
+            mensaje += f"  ✅ {archivo}\n"
+        else:
+            mensaje += f"  ❌ {archivo} (no encontrado)\n"
+            todos_ok = False
+    
+    if todos_ok:
+        mensaje += "\n✅ *Estructura completa.*\n"
+    else:
+        mensaje += "\n⚠️ *Faltan archivos. Revisa el deploy.*\n"
+    
+    # 2. Verificar base de datos
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM mensajes;")
+            count_mensajes = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM resumenes;")
+            count_resumenes = cur.fetchone()[0]
+        conn.close()
+        mensaje += f"\n💾 *Base de datos:* ✅ Conectada\n"
+        mensaje += f"   - Mensajes guardados: {count_mensajes}\n"
+        mensaje += f"   - Resúmenes guardados: {count_resumenes}\n"
+    except Exception as e:
+        mensaje += f"\n💾 *Base de datos:* ❌ Error: {str(e)[:50]}\n"
+    
+    # 3. Verificar APIs
+    deepseek_token = os.environ.get("DEEPSEEK_TOKEN")
+    groq_key = os.environ.get("GROQ_API_KEY")
+    
+    mensaje += "\n🔑 *APIs:*\n"
+    if deepseek_token:
+        mensaje += f"   ✅ DeepSeek: configurada (token: ...{deepseek_token[-4:]})\n"
+    else:
+        mensaje += "   ❌ DeepSeek: no configurada\n"
+    
+    if groq_key:
+        mensaje += f"   ✅ Groq: configurada (clave: ...{groq_key[-4:]})\n"
+    else:
+        mensaje += "   ❌ Groq: no configurada\n"
+    
+    # 4. Versión
+    mensaje += "\n📦 *Versión:* Guaribe Beta 2.0 (con memoria vectorial)"
+    
+    bot.send_message(chat_id, mensaje, parse_mode='Markdown')
+
+# ==================== HANDLER PRINCIPAL ====================
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     chat_id = m.chat.id
@@ -110,7 +182,6 @@ def handle_message(m):
             modo_analisis[chat_id] = False
             tema = texto
             bot.send_message(chat_id, f"📊 Analizando: {tema[:50]}...")
-            # Buscar contexto web
             contexto_web = buscar_en_web(tema, 3)
             contexto_texto = "\n".join(contexto_web) if contexto_web else ""
             respuesta = orquestar(
@@ -127,7 +198,6 @@ def handle_message(m):
         logger.info(f"Clasificado como: {categoria}")
         
         # --- 6. BUSCAR CONTEXTO (memoria vectorial) ---
-        from core.memory import get_connection
         conn = get_connection()
         historial = buscar_contexto(chat_id, texto, conn)
         resumenes = buscar_resumenes(chat_id, texto, conn)
@@ -180,8 +250,7 @@ def handle_feedback(call):
         _, msg_id, puntuacion = call.data.split('_')
         msg_id = int(msg_id)
         puntuacion = int(puntuacion)
-        # Actualizar clasificador con feedback
-        # (se puede expandir para guardar feedback en DB)
+        # Actualizar clasificador con feedback (se puede expandir)
         bot.answer_callback_query(call.id, "¡Gracias por tu feedback! 👍")
         bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
     except Exception as e:
@@ -202,7 +271,18 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0 - IA sin límites, costo $0"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0 - con /status"}), 200
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    url = f"https://guaribe-beta.onrender.com/webhook"
+    try:
+        bot.remove_webhook()
+        time.sleep(0.5)
+        bot.set_webhook(url=url)
+        return jsonify({"status": "ok", "message": f"Webhook configurado en {url}"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     logger.info("🚀 Iniciando Guaribe Beta 2.0...")
