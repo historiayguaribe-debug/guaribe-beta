@@ -1,1 +1,2 @@
 python-3.11.11
+Fijar versión de Python a 3.11
