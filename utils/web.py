@@ -1,52 +1,58 @@
 import requests
-from io import BytesIO
-from PIL import Image
-from gtts import gTTS
-import os
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime
 
-def generar_imagen(prompt: str, tipo: str = "general") -> BytesIO:
-    """Genera imagen con Pollinations.ai (gratis)."""
+def obtener_tasa():
+    """Obtiene la tasa oficial del BCV desde DolarAPI."""
     try:
-        prompt_limpio = prompt.replace(' ', '%20')
-        if tipo == "infografia":
-            prompt_limpio = f"infografía profesional sobre {prompt_limpio}, diseño moderno"
-        elif tipo == "logo":
-            prompt_limpio = f"logo minimalista para {prompt_limpio}, sin fondo"
-        url = f"https://image.pollinations.ai/prompt/{prompt_limpio}?width=1024&height=1024&nologo=true"
-        r = requests.get(url, timeout=60)
-        if r.status_code == 200 and r.content:
-            return BytesIO(r.content)
-        return None
+        r = requests.get("https://ve.dolarapi.com/v1/dolares", timeout=10)
+        if r.status_code == 200:
+            for item in r.json():
+                if item.get("fuente") == "oficial":
+                    return f"💰 *Tasa oficial BCV:* {item['promedio']} Bs/USD"
+        return "💰 No pude obtener la tasa."
     except:
-        return None
+        return "💰 Error al consultar la tasa."
 
-def generar_audio(texto: str) -> BytesIO:
-    """Genera audio con gTTS (gratis)."""
-    try:
-        tts = gTTS(text=texto[:500], lang='es', slow=False)
-        audio_data = BytesIO()
-        tts.write_to_fp(audio_data)
-        audio_data.seek(0)
-        return audio_data
-    except:
-        return None
+def buscar_noticias():
+    """Scrapea noticias de Venezuela desde RSS gratuitos."""
+    fuentes = [
+        ("El Universal", "https://www.eluniversal.com/rss"),
+        ("VTV", "https://www.vtv.gob.ve/feed"),
+        ("Correo del Orinoco", "https://www.correodelorinoco.gob.ve/feed"),
+        ("AVN", "https://www.avn.info.ve/feed"),
+        ("TeleSUR", "https://www.telesurtv.net/rss"),
+    ]
+    noticias = []
+    for nombre, url in fuentes:
+        try:
+            soup = BeautifulSoup(requests.get(url, timeout=10).text, 'xml')
+            for item in soup.find_all('item')[:2]:
+                titulo = item.find('title').text if item.find('title') else ""
+                if titulo and len(titulo) > 10:
+                    t = titulo.replace("Venezuela", "").strip() or titulo
+                    if len(t) > 100:
+                        t = t[:97] + "..."
+                    noticias.append(f"▪️ {t} ({nombre})")
+        except:
+            continue
+    return "📰 **Noticias de Venezuela**\n\n" + "\n".join(noticias[:10]) if noticias else "📰 No encontré noticias."
 
-def transcribir_audio(data: bytes, groq_client) -> str:
-    """Transcribe audio con Whisper de Groq (gratis)."""
-    if not groq_client:
-        return None
+def buscar_en_web(consulta: str, limite: int = 3) -> list:
+    """Busca en DuckDuckGo (gratis, sin API key)."""
     try:
-        temp_path = "/tmp/audio.ogg"
-        with open(temp_path, "wb") as f:
-            f.write(data)
-        with open(temp_path, "rb") as f:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(temp_path, f.read()),
-                model="whisper-large-v3",
-                response_format="text",
-                language="es"
-            )
-        os.remove(temp_path)
-        return transcription
+        url = f"https://lite.duckduckgo.com/lite/?q={consulta.replace(' ', '+')}"
+        soup = BeautifulSoup(requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0'
+        }).text, 'html.parser')
+        resultados = []
+        for a in soup.find_all('a'):
+            texto = a.get_text().strip()
+            if 40 < len(texto) < 300 and texto not in resultados:
+                resultados.append(texto[:180])
+                if len(resultados) >= limite:
+                    break
+        return resultados
     except:
-        return None
+        return []
