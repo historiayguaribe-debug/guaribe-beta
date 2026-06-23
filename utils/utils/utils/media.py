@@ -5,7 +5,6 @@ from gtts import gTTS
 import os
 
 def generar_imagen(prompt: str, tipo: str = "general") -> BytesIO:
-    """Genera imagen con Pollinations.ai (gratis)."""
     try:
         prompt_limpio = prompt.replace(' ', '%20')
         if tipo == "infografia":
@@ -21,7 +20,6 @@ def generar_imagen(prompt: str, tipo: str = "general") -> BytesIO:
         return None
 
 def generar_audio(texto: str) -> BytesIO:
-    """Genera audio con gTTS (gratis)."""
     try:
         tts = gTTS(text=texto[:500], lang='es', slow=False)
         audio_data = BytesIO()
@@ -32,7 +30,6 @@ def generar_audio(texto: str) -> BytesIO:
         return None
 
 def transcribir_audio(data: bytes, groq_client) -> str:
-    """Transcribe audio con Whisper de Groq (gratis)."""
     if not groq_client:
         return None
     try:
