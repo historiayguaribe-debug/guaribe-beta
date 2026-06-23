@@ -1,15 +1,24 @@
 import os
 import psycopg2
 from psycopg2.extras import DictCursor
-from sentence_transformers import SentenceTransformer
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List
 import logging
 
 logger = logging.getLogger(__name__)
 
-# ==== MODELO LIVIANO (20 MB) ====
-modelo = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
+# ==================== MODELO LAZY LOADING ====================
+modelo = None  # <-- No se carga al inicio
+
+def get_model():
+    """Carga el modelo SOLO la primera vez que se necesita."""
+    global modelo
+    if modelo is None:
+        from sentence_transformers import SentenceTransformer
+        logger.info("🧠 Cargando modelo de embeddings (esto solo ocurre una vez)...")
+        modelo = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
+        logger.info("✅ Modelo cargado correctamente")
+    return modelo
 
 def get_connection():
     return psycopg2.connect(os.environ.get("DATABASE_URL"))
@@ -17,7 +26,7 @@ def get_connection():
 def embed(texto: str) -> List[float]:
     if not texto or len(texto) < 2:
         return [0.0] * 384
-    return modelo.encode(texto, normalize_embeddings=True).tolist()
+    return get_model().encode(texto, normalize_embeddings=True).tolist()
 
 def guardar_mensaje(chat_id: int, rol: str, mensaje: str, conn=None):
     if not mensaje or len(mensaje) < 3:
@@ -45,7 +54,8 @@ def guardar_mensaje(chat_id: int, rol: str, mensaje: str, conn=None):
             conn.commit()
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
-        conn.rollback()
+        if conn:
+            conn.rollback()
     finally:
         if close_conn and conn:
             conn.close()
@@ -98,7 +108,8 @@ def guardar_resumen(chat_id: int, resumen: str, temas: List[str], conn=None):
             conn.commit()
     except Exception as e:
         logger.error(f"Error guardando resumen: {e}")
-        conn.rollback()
+        if conn:
+            conn.rollback()
     finally:
         if close_conn and conn:
             conn.close()
