@@ -1,40 +1,43 @@
 [PENSADORES CLÁSICOS]
-Marx: lucha de clases, plusvalía, materialismo histórico. La historia de la humanidad es la historia de la lucha de clases. El capitalismo explota al trabajador al pagarle menos del valor que produce.
-Gramsci: hegemonía, intelectuales orgánicos, sociedad civil vs sociedad política. El poder no se ejerce solo con fuerza, sino con consenso. La cultura es un campo de batalla.
-Maquiavelo: el príncipe, el poder como fin, realismo político. El fin justifica los medios cuando se trata de mantener el poder y la estabilidad.
-Confucio: armonía social, jerarquía natural, el gobernante virtuoso. Un buen gobernante es como un padre sabio que cuida de su pueblo.
+Marx: lucha de clases, plusvalía, materialismo histórico.
+Gramsci: hegemonía, intelectuales orgánicos, sociedad civil vs sociedad política.
+Maquiavelo: el príncipe, el poder como fin, realismo político.
+Confucio: armonía social, jerarquía natural, el gobernante virtuoso.
 
 [PENSADORES LATINOAMERICANOS]
-Simón Bolívar: independencia, integración continental, libertad. La unión de los pueblos americanos es la única garantía de su soberanía.
-Simón Rodríguez: educación popular, republicanismo, pensamiento propio. "O inventamos o erramos". La educación debe formar ciudadanos libres, no súbditos.
-José Martí: antiimperialismo, Nuestra América, el equilibrio del mundo. Los pueblos de América deben unirse para resistir al norte.
-Eduardo Galeano: la dependencia, el extractivismo, la memoria del fuego. América Latina ha sido saqueada durante 500 años.
+Simón Bolívar: independencia, integración continental, libertad.
+Simón Rodríguez: educación popular, republicanismo, pensamiento propio.
+José Martí: antiimperialismo, Nuestra América, el equilibrio del mundo.
+Eduardo Galeano: la dependencia, el extractivismo, la memoria del fuego.
 
 [TEORÍA POLÍTICA Y GEOPOLÍTICA]
-Noam Chomsky: medios de comunicación, propaganda, imperialismo. Los medios fabrican el consentimiento de la población para aceptar políticas que la perjudican.
-Sun Tzu: el arte de la guerra, estrategia sin combate, conocimiento del enemigo. Conocerse a sí mismo y al enemigo es la clave de la victoria.
-Vladimir Lenin: imperialismo como fase superior del capitalismo. El capitalismo necesita expandirse y explotar otros países para sobrevivir.
-Frantz Fanon: descolonización, violencia y liberación. La descolonización es un proceso violento porque el colonizador no se va voluntariamente.
+Noam Chomsky: medios de comunicación, propaganda, imperialismo.
+Sun Tzu: el arte de la guerra, estrategia sin combate, conocimiento del enemigo.
+Vladimir Lenin: imperialismo como fase superior del capitalismo.
+Frantz Fanon: descolonización, violencia y liberación.
 
 [CONCEPTOS CLAVE]
-Neoliberalismo: privatización, desregulación, estado mínimo. Es un modelo que transfiere riqueza de los pobres a los ricos.
-Multipolaridad: equilibrio de poderes, soberanía, bloques regionales. Un mundo con varios centros de poder, no uno solo.
-Guerra híbrida: cognitiva, mediática, económica, militar. Combina todas las formas de ataque sin declarar guerra abiertamente.
-Hegemonía cultural: dominación ideológica, sentido común, consentimiento. El poder no se impone solo con armas, también con ideas.
-Autodeterminación: derecho de los pueblos a decidir su destino. Ningún país tiene derecho a imponer su voluntad sobre otro.
-Agenda 2030: objetivos de desarrollo sostenible, pero también control global y pérdida de soberanía alimentaria y económica.
-Poder blando: influencia cultural, mediática, diplomática. Persuadir sin usar la fuerza.
-Poder duro: capacidad militar, económica, tecnológica. Imponer por la fuerza o la presión.
+Neoliberalismo: privatización, desregulación, estado mínimo.
+Multipolaridad: equilibrio de poderes, soberanía, bloques regionales.
+Guerra híbrida: cognitiva, mediática, económica, militar.
+Hegemonía cultural: dominación ideológica, sentido común, consentimiento.
+Autodeterminación: derecho de los pueblos a decidir su destino.
 
 [AUTORES Y CONCEPTOS DE IA]
-Datos como poder: la acumulación de datos es la nueva forma de capital. Quien controla los datos, controla el mundo.
+Datos como poder: la acumulación de datos como nueva forma de capital.
+Algoritmos y sesgo: la IA no es neutral, reproduce estructuras de poder.
+IA y trabajo: automatización, desempleo tecnológico, nuevas formas de explotación.
+Ética de la IA: ¿quién decide? ¿para qué sirve? ¿a quién beneficia?
+Vigilancia digital: control social, huella digital, soberanía de datos.
+Aprendizaje autónomo: sistemas que se entrenan a sí mismos sin supervisión.
+Modelos de lenguaje: cómo funciona, qué puede y qué no puede hacer.
+Código abierto: libertad tecnológica, soberanía digital, resistencia.
 
-Agrega conocimiento crítico para Guaribe
-Algoritmos y sesgo: la IA no es neutral. Reproduce y amplifica los sesgos de quienes la crean y los datos con los que se entrena.
-IA y trabajo: automatización, desempleo tecnológico, nuevas formas de explotación. La IA no crea riqueza para todos, la concentra.
-Ética de la IA: ¿quién decide? ¿para qué sirve? ¿a quién beneficia? Una IA ética debe estar al servicio de la humanidad, no de las corporaciones.
-Vigilancia digital: control social, huella digital, soberanía de datos. Cada vez que usamos tecnología, dejamos un rastro que puede ser usado para controlarnos.
-Aprendizaje autónomo: sistemas que se entrenan a sí mismos sin supervisión. Pueden volverse impredecibles.
-Modelos de lenguaje: cómo funciona, qué puede y qué no puede hacer. No entienden, solo predicen.
-Código abierto: libertad tecnológica, soberanía digital, resistencia. La tecnología debe ser libre para que los pueblos puedan controlarla.
-Guerra cognitiva: manipulación de la percepción, desinformación, control mental. Se lucha por la mente de las personas, no por su territorio.
+[ACTUALIDAD Y ESTRATEGIA]
+Agenda 2030: desarrollo sostenible vs. nuevas formas de control.
+Guerra cognitiva: manipulación de la percepción, control de narrativas.
+Poder suave: influencia cultural y mediática.
+Poder duro: coerción económica y militar.
+Semiótica: análisis de signos y símbolos en la comunicación política.
+Psicología de masas: comportamiento colectivo, manipulación emocional.
+Sexta generación de guerra: guerra total sin combate físico.
