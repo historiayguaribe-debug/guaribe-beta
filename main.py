@@ -9,10 +9,6 @@ import threading
 from flask import Flask, request, jsonify
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== CONFIGURACIÓN DEL WEBHOOK ====================
-if os.environ.get("WEBHOOK_CONFIGURED") != "true":
-    pass  # Se configurará al final
-
 # ==================== IMPORTS CON FALLBACK ====================
 try:
     from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, get_connection
@@ -58,7 +54,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN no configurado en variables de entorno.")
+    raise ValueError("❌ TELEGRAM_TOKEN no configurado.")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 modo_analisis = {}
@@ -75,24 +71,19 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
-    """Configura el webhook UNA SOLA VEZ."""
-    if os.environ.get("WEBHOOK_CONFIGURED") == "true":
-        logger.info("⏭️ Webhook ya configurado, saltando...")
-        return True
-    
+    """Configura el webhook con reintentos, sin bloquear."""
     url = "https://guaribe-beta.onrender.com/webhook"
     for i in range(3):
         try:
             bot.remove_webhook()
             time.sleep(0.5)
             bot.set_webhook(url=url)
-            os.environ["WEBHOOK_CONFIGURED"] = "true"
             logger.info(f"✅ Webhook configurado en {url}")
             return True
         except Exception as e:
             logger.warning(f"⚠️ Intento {i+1} falló: {e}")
             time.sleep(1)
-    logger.error("❌ No se pudo configurar el webhook después de 3 intentos.")
+    logger.error("❌ No se pudo configurar el webhook.")
     return False
 
 # ==================== HANDLERS ====================
@@ -114,9 +105,8 @@ def cmd_start(m):
 def cmd_status(m):
     chat_id = m.chat.id
     if str(chat_id) != ADMIN_CHAT_ID:
-        bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
+        bot.send_message(chat_id, "⛔ No autorizado.")
         return
-
     status_msg = "📁 *ESTADO DE GUARIBE BETA*\n\n"
     status_msg += "✅ *Módulos disponibles:*\n"
     status_msg += f"   {'✅' if MEMORY_AVAILABLE else '❌'} Memoria\n"
@@ -125,7 +115,6 @@ def cmd_status(m):
     status_msg += f"   {'✅' if STRATEGIST_AVAILABLE else '❌'} Estratega\n"
     status_msg += f"   {'✅' if WEB_AVAILABLE else '❌'} Web\n"
     status_msg += f"   {'✅' if MEDIA_AVAILABLE else '❌'} Media\n"
-    status_msg += f"\n🌐 Webhook: {'✅' if os.environ.get('WEBHOOK_CONFIGURED') == 'true' else '❌'}\n"
     bot.send_message(chat_id, status_msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['admin_clean'])
@@ -158,12 +147,12 @@ def handle_message(m):
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
 
     try:
-        # --- SALUDOS (sin IA) ---
+        # --- SALUDOS ---
         if texto.lower() in ["hola", "buenas", "hey", "saludos", "epa"]:
             bot.send_message(chat_id, "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠")
             return
 
-        # --- ACCIONES RÁPIDAS (tasa, noticias, imagen) ---
+        # --- ACCIONES RÁPIDAS ---
         if WEB_AVAILABLE:
             if "tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower():
                 bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
@@ -233,7 +222,6 @@ def handle_message(m):
         else:
             respuesta = f"🏓 Pong! Recibí: {texto}\n\n(Modo orquestador no disponible)"
 
-        # --- ENVIAR RESPUESTA ---
         sent_msg = bot.send_message(chat_id, respuesta, parse_mode='Markdown')
 
         # --- FEEDBACK ---
@@ -244,7 +232,7 @@ def handle_message(m):
         )
         bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
 
-        # --- GUARDAR EN MEMORIA (async) ---
+        # --- GUARDAR EN MEMORIA ---
         if MEMORY_AVAILABLE:
             def guardar():
                 try:
@@ -298,6 +286,10 @@ def webhook():
 def home():
     return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0"}), 200
 
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok"}), 200
+
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     if configurar_webhook():
@@ -307,9 +299,10 @@ def set_webhook():
 # ==================== EJECUCIÓN ====================
 if __name__ == "__main__":
     logger.info("🚀 Iniciando Guaribe (modo desarrollo)...")
-    configurar_webhook()
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 else:
+    # En producción, el webhook se configura MANUALMENTE o al recibir la primera solicitud
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
     logger.info("✅ Servidor listo para recibir peticiones")
+    logger.info("📌 Visita /set_webhook para configurar el webhook manualmente")
