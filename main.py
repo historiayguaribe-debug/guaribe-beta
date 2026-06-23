@@ -9,15 +9,13 @@ import threading
 from flask import Flask, request, jsonify
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== CONFIGURACIÓN DEL WEBHOOK (UNA SOLA VEZ) ====================
-# Esta variable evita que múltiples workers configuren el webhook al mismo tiempo
+# ==================== CONFIGURACIÓN DEL WEBHOOK ====================
 if os.environ.get("WEBHOOK_CONFIGURED") != "true":
-    # No hacemos nada aquí, se configurará al final
-    pass
+    pass  # Se configurará al final
 
 # ==================== IMPORTS CON FALLBACK ====================
 try:
-    from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, guardar_resumen, get_connection
+    from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, get_connection
     MEMORY_AVAILABLE = True
 except ImportError:
     MEMORY_AVAILABLE = False
@@ -77,7 +75,7 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
-    """Configura el webhook UNA SOLA VEZ usando variable de entorno."""
+    """Configura el webhook UNA SOLA VEZ."""
     if os.environ.get("WEBHOOK_CONFIGURED") == "true":
         logger.info("⏭️ Webhook ya configurado, saltando...")
         return True
@@ -216,7 +214,7 @@ def handle_message(m):
             bot.send_message(chat_id, "🎙️ Pronto podré responderte con audio.")
             return
 
-        # --- RESPUESTA CON ORQUESTADOR (si está disponible) ---
+        # --- RESPUESTA CON ORQUESTADOR ---
         categoria = "simple"
         if CLASSIFIER_AVAILABLE:
             categoria = clasificador.clasificar(texto)
@@ -233,7 +231,6 @@ def handle_message(m):
         if ORCHESTRATOR_AVAILABLE:
             respuesta = orquestar(texto, categoria, contexto, {})
         else:
-            # FALLBACK: respuesta tipo "Pong" si no hay orquestador
             respuesta = f"🏓 Pong! Recibí: {texto}\n\n(Modo orquestador no disponible)"
 
         # --- ENVIAR RESPUESTA ---
@@ -259,7 +256,7 @@ def handle_message(m):
                     logger.warning(f"Error guardando: {e}")
             threading.Thread(target=guardar).start()
 
-        # --- ESTRATEGA (aprender patrones) ---
+        # --- ESTRATEGA ---
         if STRATEGIST_AVAILABLE:
             try:
                 estratega.aprender(chat_id, texto, respuesta)
@@ -314,7 +311,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 else:
-    # ==== PRODUCCIÓN: CONFIGURAR WEBHOOK UNA SOLA VEZ ====
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
-    configurar_webhook()
     logger.info("✅ Servidor listo para recibir peticiones")
