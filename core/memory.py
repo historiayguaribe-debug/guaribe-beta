@@ -8,21 +8,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Cargar modelo de embeddings (se carga una sola vez al inicio)
-modelo = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+# ==== MODELO LIVIANO (20 MB) ====
+modelo = SentenceTransformer('paraphrase-MiniLM-L3-v2', device='cpu')
 
 def get_connection():
-    """Obtiene conexión a PostgreSQL desde la variable de entorno DATABASE_URL."""
     return psycopg2.connect(os.environ.get("DATABASE_URL"))
 
 def embed(texto: str) -> List[float]:
-    """Convierte un texto en un vector de 384 dimensiones."""
     if not texto or len(texto) < 2:
         return [0.0] * 384
     return modelo.encode(texto, normalize_embeddings=True).tolist()
 
 def guardar_mensaje(chat_id: int, rol: str, mensaje: str, conn=None):
-    """Guarda un mensaje con su embedding y mantiene solo los últimos 20 mensajes por chat."""
     if not mensaje or len(mensaje) < 3:
         return
     embedding = embed(mensaje)
@@ -36,7 +33,6 @@ def guardar_mensaje(chat_id: int, rol: str, mensaje: str, conn=None):
                 INSERT INTO mensajes (chat_id, rol, mensaje, embedding)
                 VALUES (%s, %s, %s, %s)
             """, (chat_id, rol, mensaje, embedding))
-            # Mantener solo los últimos 20 mensajes por chat
             cur.execute("""
                 DELETE FROM mensajes
                 WHERE chat_id = %s AND id NOT IN (
@@ -49,14 +45,12 @@ def guardar_mensaje(chat_id: int, rol: str, mensaje: str, conn=None):
             conn.commit()
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
-        if conn:
-            conn.rollback()
+        conn.rollback()
     finally:
         if close_conn and conn:
             conn.close()
 
 def buscar_contexto(chat_id: int, consulta: str, conn=None, limite: int = 3) -> List[str]:
-    """Busca los mensajes más relevantes por similitud coseno."""
     embedding = embed(consulta)
     close_conn = False
     if conn is None:
@@ -79,7 +73,6 @@ def buscar_contexto(chat_id: int, consulta: str, conn=None, limite: int = 3) -> 
             conn.close()
 
 def guardar_resumen(chat_id: int, resumen: str, temas: List[str], conn=None):
-    """Guarda un resumen con embedding y mantiene solo los últimos 10 resúmenes por chat."""
     if not resumen or len(resumen) < 20:
         return
     embedding = embed(resumen)
@@ -105,14 +98,12 @@ def guardar_resumen(chat_id: int, resumen: str, temas: List[str], conn=None):
             conn.commit()
     except Exception as e:
         logger.error(f"Error guardando resumen: {e}")
-        if conn:
-            conn.rollback()
+        conn.rollback()
     finally:
         if close_conn and conn:
             conn.close()
 
 def buscar_resumenes(chat_id: int, consulta: str, conn=None, limite: int = 2) -> List[str]:
-    """Busca resúmenes relevantes."""
     embedding = embed(consulta)
     close_conn = False
     if conn is None:
