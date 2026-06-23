@@ -7,10 +7,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# === MODELO CON CARGA BAJO DEMANDA (LAZY LOADING) ===
 modelo = None
 
 def get_model():
-    """Carga el modelo de embeddings solo cuando se necesita (lazy loading)."""
+    """Carga el modelo de embeddings solo cuando se necesita."""
     global modelo
     if modelo is None:
         from sentence_transformers import SentenceTransformer
