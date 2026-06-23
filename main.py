@@ -2,6 +2,9 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
+# === FUERZA 1 WORKER PARA AHORRAR MEMORIA ===
+os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
+
 import time
 import telebot
 import logging
