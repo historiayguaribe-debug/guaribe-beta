@@ -23,7 +23,7 @@ except ImportError:
     CLASSIFIER_AVAILABLE = False
 
 try:
-    from core.orchestrator import orquestar
+    from core.orchestrator import orquestar  # <--- NUEVO ORQUESTADOR
     ORCHESTRATOR_AVAILABLE = True
 except ImportError:
     ORCHESTRATOR_AVAILABLE = False
@@ -58,7 +58,7 @@ if not TELEGRAM_TOKEN:
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 modo_analisis = {}
-webhook_configurado = False  # <--- FLAG PARA EVITAR DUPLICADOS
+webhook_configurado = False
 
 # ==================== FUNCIONES AUXILIARES ====================
 def menu_principal():
@@ -72,7 +72,7 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
-    """Configura el webhook UNA SOLA VEZ."""
+    """Configura el webhook una sola vez."""
     global webhook_configurado
     if webhook_configurado:
         logger.info("⏭️ Webhook ya configurado, saltando...")
@@ -191,7 +191,13 @@ def handle_message(m):
             else:
                 contexto_texto = ""
             if ORCHESTRATOR_AVAILABLE:
-                respuesta = orquestar(tema, "compleja", [contexto_texto] if contexto_texto else [], {})
+                # El orquestador ahora maneja el conocimiento crítico
+                respuesta = orquestar(
+                    consulta=tema,
+                    categoria="compleja",
+                    contexto=[contexto_texto] if contexto_texto else [],
+                    perfil={}
+                )
                 bot.send_message(chat_id, respuesta, parse_mode='Markdown')
             else:
                 bot.send_message(chat_id, f"🔮 Análisis en construcción. Tema: '{tema}'")
@@ -212,7 +218,7 @@ def handle_message(m):
             bot.send_message(chat_id, "🎙️ Pronto podré responderte con audio.")
             return
 
-        # --- RESPUESTA GENÉRICA CON ORQUESTADOR ---
+        # --- CONSULTA GENERAL CON ORQUESTADOR ---
         categoria = "simple"
         if CLASSIFIER_AVAILABLE:
             categoria = clasificador.clasificar(texto)
@@ -221,8 +227,10 @@ def handle_message(m):
         if MEMORY_AVAILABLE:
             try:
                 conn = get_connection()
-                contexto = buscar_contexto(chat_id, texto, conn) + buscar_resumenes(chat_id, texto, conn)
+                historial = buscar_contexto(chat_id, texto, conn)
+                resumenes = buscar_resumenes(chat_id, texto, conn)
                 conn.close()
+                contexto = historial + resumenes
             except Exception as e:
                 logger.warning(f"Error en memoria: {e}")
 
@@ -292,7 +300,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0 - Con orquestador crítico"}), 200
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
@@ -307,7 +315,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 else:
-    # Producción: configurar webhook UNA SOLA VEZ
+    # Producción
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
     configurar_webhook()
     logger.info("✅ Servidor listo")
