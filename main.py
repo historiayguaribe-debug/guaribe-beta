@@ -2,100 +2,83 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
+os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
+os.environ["WEB_CONCURRENCY"] = "1"
+
 import time
 import telebot
 import logging
 import threading
-import requests
-from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== FUERZA 1 WORKER ====================
-os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
-os.environ["WEB_CONCURRENCY"] = "1"
+# ==================== CONFIGURACIÓN DE LOGGING ====================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ==================== FUNCIONES DE UTILS/WEB (integradas) ====================
-def obtener_tasa():
-    try:
-        r = requests.get("https://ve.dolarapi.com/v1/dolares", timeout=10)
-        if r.status_code == 200:
-            for item in r.json():
-                if item.get("fuente") == "oficial":
-                    return f"💰 *Tasa oficial BCV:* {item['promedio']} Bs/USD"
-        return "💰 No pude obtener la tasa."
-    except:
-        return "💰 Error al consultar la tasa."
+# ==================== IMPORTS CON FALLBACK Y LAZY LOADING ====================
+# Memoria (se carga bajo demanda)
+MEMORY_AVAILABLE = False
+guardar_mensaje = None
+buscar_contexto = None
+buscar_resumenes = None
+get_connection = None
 
-def buscar_noticias():
-    fuentes = [
-        ("El Universal", "https://www.eluniversal.com/rss"),
-        ("VTV", "https://www.vtv.gob.ve/feed"),
-        ("Correo del Orinoco", "https://www.correodelorinoco.gob.ve/feed"),
-        ("AVN", "https://www.avn.info.ve/feed"),
-        ("TeleSUR", "https://www.telesurtv.net/rss"),
-    ]
-    noticias = []
-    for nombre, url in fuentes:
+def cargar_memoria():
+    global MEMORY_AVAILABLE, guardar_mensaje, buscar_contexto, buscar_resumenes, get_connection
+    if not MEMORY_AVAILABLE:
         try:
-            soup = BeautifulSoup(requests.get(url, timeout=10).text, 'xml')
-            for item in soup.find_all('item')[:2]:
-                titulo = item.find('title').text if item.find('title') else ""
-                if titulo and len(titulo) > 10:
-                    t = titulo.replace("Venezuela", "").strip() or titulo
-                    if len(t) > 100:
-                        t = t[:97] + "..."
-                    noticias.append(f"▪️ {t} ({nombre})")
-        except:
-            continue
-    return "📰 **Noticias de Venezuela**\n\n" + "\n".join(noticias[:10]) if noticias else "📰 No encontré noticias."
+            from core.memory import guardar_mensaje as _gm, buscar_contexto as _bc, buscar_resumenes as _br, get_connection as _gc
+            guardar_mensaje = _gm
+            buscar_contexto = _bc
+            buscar_resumenes = _br
+            get_connection = _gc
+            MEMORY_AVAILABLE = True
+            logger.info("✅ Memoria cargada bajo demanda")
+        except ImportError as e:
+            logger.warning(f"⚠️ Memoria no disponible: {e}")
 
-def buscar_en_web(consulta: str, limite: int = 3) -> list:
-    try:
-        url = f"https://lite.duckduckgo.com/lite/?q={consulta.replace(' ', '+')}"
-        soup = BeautifulSoup(requests.get(url, timeout=15, headers={
-            'User-Agent': 'Mozilla/5.0'
-        }).text, 'html.parser')
-        resultados = []
-        for a in soup.find_all('a'):
-            texto = a.get_text().strip()
-            if 40 < len(texto) < 300 and texto not in resultados:
-                resultados.append(texto[:180])
-                if len(resultados) >= limite:
-                    break
-        return resultados
-    except:
-        return []
-
-# ==================== IMPORTS DE CORE CON FALLBACK ====================
-try:
-    from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, get_connection
-    MEMORY_AVAILABLE = True
-except ImportError:
-    MEMORY_AVAILABLE = False
-
+# Clasificador
 try:
     from core.classifier import clasificador
     CLASSIFIER_AVAILABLE = True
 except ImportError:
     CLASSIFIER_AVAILABLE = False
+    logger.warning("⚠️ Clasificador no disponible")
 
+# Orquestador
 try:
     from core.orchestrator import orquestar
     ORCHESTRATOR_AVAILABLE = True
 except ImportError:
     ORCHESTRATOR_AVAILABLE = False
+    logger.warning("⚠️ Orquestador no disponible")
 
+# Estratega
 try:
     from core.strategist import estratega
     STRATEGIST_AVAILABLE = True
 except ImportError:
     STRATEGIST_AVAILABLE = False
+    logger.warning("⚠️ Estratega no disponible")
 
-# ==================== CONFIGURACIÓN ====================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Web
+try:
+    from utils.web import obtener_tasa, buscar_noticias, buscar_en_web
+    WEB_AVAILABLE = True
+except ImportError:
+    WEB_AVAILABLE = False
+    logger.warning("⚠️ utils.web no disponible")
 
+# Media
+try:
+    from utils.media import generar_imagen, generar_audio, transcribir_audio
+    MEDIA_AVAILABLE = True
+except ImportError:
+    MEDIA_AVAILABLE = False
+    logger.warning("⚠️ utils.media no disponible")
+
+# ==================== CONFIGURACIÓN DEL BOT ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
@@ -117,9 +100,11 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
+    """Configura el webhook UNA SOLA VEZ."""
     if os.environ.get("WEBHOOK_CONFIGURED") == "true":
         logger.info("⏭️ Webhook ya configurado, saltando...")
         return True
+    
     url = "https://guaribe-beta.onrender.com/webhook"
     for i in range(3):
         try:
@@ -156,12 +141,15 @@ def cmd_status(m):
     if str(chat_id) != ADMIN_CHAT_ID:
         bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
         return
+
     status_msg = "📁 *ESTADO DE GUARIBE BETA*\n\n"
     status_msg += "✅ *Módulos disponibles:*\n"
     status_msg += f"   {'✅' if MEMORY_AVAILABLE else '❌'} Memoria\n"
     status_msg += f"   {'✅' if CLASSIFIER_AVAILABLE else '❌'} Clasificador\n"
     status_msg += f"   {'✅' if ORCHESTRATOR_AVAILABLE else '❌'} Orquestador\n"
     status_msg += f"   {'✅' if STRATEGIST_AVAILABLE else '❌'} Estratega\n"
+    status_msg += f"   {'✅' if WEB_AVAILABLE else '❌'} Web\n"
+    status_msg += f"   {'✅' if MEDIA_AVAILABLE else '❌'} Media\n"
     status_msg += f"\n🌐 Webhook: {'✅' if os.environ.get('WEBHOOK_CONFIGURED') == 'true' else '❌'}\n"
     bot.send_message(chat_id, status_msg, parse_mode='Markdown')
 
@@ -184,35 +172,52 @@ def cmd_admin_clean(m):
     except Exception as e:
         bot.send_message(m.chat.id, f"❌ Error: {e}")
 
-# ==================== HANDLER PRINCIPAL ====================
+# ==================== HANDLER PRINCIPAL (CORREGIDO) ====================
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     chat_id = m.chat.id
     texto = m.text or ""
     if not texto or len(texto) < 2:
         return
+
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
+
     try:
-        # --- SALUDOS ---
-        if texto.lower() in ["hola", "buenas", "hey", "saludos", "epa"]:
+        # --- SALUDOS MUY BÁSICOS (sin IA) ---
+        if texto.lower() in ["hola", "epa", "hey"]:
             bot.send_message(chat_id, "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠")
             return
 
-        # --- ACCIONES RÁPIDAS ---
-        if "tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower():
-            bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
-            return
-        if "noticias" in texto.lower() or "qué pasó" in texto.lower():
-            bot.send_message(chat_id, buscar_noticias(), parse_mode='Markdown')
-            return
+        # --- ACCIONES RÁPIDAS (tasa, noticias, imagen) ---
+        if WEB_AVAILABLE:
+            if "tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower():
+                bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
+                return
+            if "noticias" in texto.lower() or "qué pasó" in texto.lower():
+                noticias = buscar_noticias()
+                bot.send_message(chat_id, noticias, parse_mode='Markdown')
+                return
+
+        if MEDIA_AVAILABLE:
+            if "genera" in texto.lower() and ("imagen" in texto.lower() or "dibujo" in texto.lower()):
+                bot.send_message(chat_id, "🎨 Generando imagen... (puede tomar unos segundos)")
+                img = generar_imagen(texto)
+                if img:
+                    bot.send_photo(chat_id, img, caption=f"🎨 *{texto[:50]}...*", parse_mode='Markdown')
+                else:
+                    bot.send_message(chat_id, "❌ No pude generar la imagen. Intenta con otro prompt.")
+                return
 
         # --- MODO ANÁLISIS ---
         if chat_id in modo_analisis and modo_analisis[chat_id]:
             modo_analisis[chat_id] = False
             tema = texto
             bot.send_message(chat_id, f"📊 Analizando: {tema[:50]}...")
-            contexto_web = buscar_en_web(tema, 3)
-            contexto_texto = "\n".join(contexto_web) if contexto_web else ""
+            if WEB_AVAILABLE:
+                contexto_web = buscar_en_web(tema, 3)
+                contexto_texto = "\n".join(contexto_web) if contexto_web else ""
+            else:
+                contexto_texto = ""
             if ORCHESTRATOR_AVAILABLE:
                 respuesta = orquestar(tema, "compleja", [contexto_texto] if contexto_texto else [], {})
                 bot.send_message(chat_id, respuesta, parse_mode='Markdown')
@@ -222,10 +227,10 @@ def handle_message(m):
 
         # --- BOTONES ---
         if texto == "💰 Tasa BCV":
-            bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
+            bot.send_message(chat_id, obtener_tasa() if WEB_AVAILABLE else "⚠️ No disponible.")
             return
         if texto == "📰 Noticias":
-            bot.send_message(chat_id, buscar_noticias(), parse_mode='Markdown')
+            bot.send_message(chat_id, buscar_noticias() if WEB_AVAILABLE else "⚠️ No disponible.")
             return
         if texto == "🔮 Analizar":
             modo_analisis[chat_id] = True
@@ -235,7 +240,11 @@ def handle_message(m):
             bot.send_message(chat_id, "🎙️ Pronto podré responderte con audio.")
             return
 
-        # --- RESPUESTA CON ORQUESTADOR ---
+        # --- CARGAR MEMORIA SI ES NECESARIO ---
+        if not MEMORY_AVAILABLE:
+            cargar_memoria()
+
+        # --- RESPUESTA CON ORQUESTADOR (para todo lo demás) ---
         categoria = "simple"
         if CLASSIFIER_AVAILABLE:
             categoria = clasificador.clasificar(texto)
@@ -264,7 +273,7 @@ def handle_message(m):
         )
         bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
 
-        # --- GUARDAR EN MEMORIA ---
+        # --- GUARDAR EN MEMORIA (async) ---
         if MEMORY_AVAILABLE:
             def guardar():
                 try:
