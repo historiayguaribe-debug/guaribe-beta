@@ -4,7 +4,6 @@ import re
 from datetime import datetime
 
 def obtener_tasa():
-    """Obtiene la tasa BCV desde DolarAPI (gratis)."""
     try:
         r = requests.get("https://ve.dolarapi.com/v1/dolares", timeout=10)
         if r.status_code == 200:
@@ -16,7 +15,6 @@ def obtener_tasa():
         return "💰 Error al consultar la tasa."
 
 def buscar_noticias():
-    """Scrapea noticias de Venezuela desde RSS gratuitos."""
     fuentes = [
         ("El Universal", "https://www.eluniversal.com/rss"),
         ("VTV", "https://www.vtv.gob.ve/feed"),
@@ -40,12 +38,9 @@ def buscar_noticias():
     return "📰 **Noticias de Venezuela**\n\n" + "\n".join(noticias[:10]) if noticias else "📰 No encontré noticias."
 
 def buscar_en_web(consulta: str, limite: int = 3) -> list:
-    """Busca en DuckDuckGo (gratis, sin API key)."""
     try:
         url = f"https://lite.duckduckgo.com/lite/?q={consulta.replace(' ', '+')}"
-        soup = BeautifulSoup(requests.get(url, timeout=15, headers={
-            'User-Agent': 'Mozilla/5.0'
-        }).text, 'html.parser')
+        soup = BeautifulSoup(requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'}).text, 'html.parser')
         resultados = []
         for a in soup.find_all('a'):
             texto = a.get_text().strip()
