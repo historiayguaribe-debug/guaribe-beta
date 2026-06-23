@@ -28,6 +28,8 @@ Poder duro: capacidad militar, económica, tecnológica. Imponer por la fuerza o
 
 [AUTORES Y CONCEPTOS DE IA]
 Datos como poder: la acumulación de datos es la nueva forma de capital. Quien controla los datos, controla el mundo.
+
+Agrega conocimiento crítico para Guaribe
 Algoritmos y sesgo: la IA no es neutral. Reproduce y amplifica los sesgos de quienes la crean y los datos con los que se entrena.
 IA y trabajo: automatización, desempleo tecnológico, nuevas formas de explotación. La IA no crea riqueza para todos, la concentra.
 Ética de la IA: ¿quién decide? ¿para qué sirve? ¿a quién beneficia? Una IA ética debe estar al servicio de la humanidad, no de las corporaciones.
