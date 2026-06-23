@@ -4,6 +4,7 @@ monkey.patch_all()
 import os
 # === FUERZA 1 WORKER PARA AHORRAR MEMORIA ===
 os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
+os.environ["WEB_CONCURRENCY"] = "1"
 
 import time
 import telebot
@@ -57,7 +58,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN no configurado.")
+    raise ValueError("❌ TELEGRAM_TOKEN no configurado en variables de entorno.")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 modo_analisis = {}
@@ -74,19 +75,24 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
-    """Configura el webhook con reintentos, sin bloquear."""
+    """Configura el webhook UNA SOLA VEZ."""
+    if os.environ.get("WEBHOOK_CONFIGURED") == "true":
+        logger.info("⏭️ Webhook ya configurado, saltando...")
+        return True
+    
     url = "https://guaribe-beta.onrender.com/webhook"
     for i in range(3):
         try:
             bot.remove_webhook()
             time.sleep(0.5)
             bot.set_webhook(url=url)
+            os.environ["WEBHOOK_CONFIGURED"] = "true"
             logger.info(f"✅ Webhook configurado en {url}")
             return True
         except Exception as e:
             logger.warning(f"⚠️ Intento {i+1} falló: {e}")
             time.sleep(1)
-    logger.error("❌ No se pudo configurar el webhook.")
+    logger.error("❌ No se pudo configurar el webhook después de 3 intentos.")
     return False
 
 # ==================== HANDLERS ====================
@@ -108,8 +114,9 @@ def cmd_start(m):
 def cmd_status(m):
     chat_id = m.chat.id
     if str(chat_id) != ADMIN_CHAT_ID:
-        bot.send_message(chat_id, "⛔ No autorizado.")
+        bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
         return
+
     status_msg = "📁 *ESTADO DE GUARIBE BETA*\n\n"
     status_msg += "✅ *Módulos disponibles:*\n"
     status_msg += f"   {'✅' if MEMORY_AVAILABLE else '❌'} Memoria\n"
@@ -118,6 +125,7 @@ def cmd_status(m):
     status_msg += f"   {'✅' if STRATEGIST_AVAILABLE else '❌'} Estratega\n"
     status_msg += f"   {'✅' if WEB_AVAILABLE else '❌'} Web\n"
     status_msg += f"   {'✅' if MEDIA_AVAILABLE else '❌'} Media\n"
+    status_msg += f"\n🌐 Webhook: {'✅' if os.environ.get('WEBHOOK_CONFIGURED') == 'true' else '❌'}\n"
     bot.send_message(chat_id, status_msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['admin_clean'])
@@ -289,10 +297,6 @@ def webhook():
 def home():
     return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0"}), 200
 
-@app.route('/health')
-def health():
-    return jsonify({"status": "ok"}), 200
-
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     if configurar_webhook():
@@ -302,10 +306,9 @@ def set_webhook():
 # ==================== EJECUCIÓN ====================
 if __name__ == "__main__":
     logger.info("🚀 Iniciando Guaribe (modo desarrollo)...")
+    configurar_webhook()
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 else:
-    # En producción, el webhook se configura MANUALMENTE o al recibir la primera solicitud
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
     logger.info("✅ Servidor listo para recibir peticiones")
-    logger.info("📌 Visita /set_webhook para configurar el webhook manualmente")
