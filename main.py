@@ -2,65 +2,89 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
-# === FUERZA 1 WORKER PARA AHORRAR MEMORIA ===
-os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
-os.environ["WEB_CONCURRENCY"] = "1"
-
-import time
-import telebot
+import sys
 import logging
-import threading
-from flask import Flask, request, jsonify
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== IMPORTS CON FALLBACK ====================
+# === CONFIGURAR LOGGING PARA QUE MUESTRE ERRORES DETALLADOS ===
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# === CAPTURAR ERRORES DE IMPORTACIÓN ===
+try:
+    import telebot
+    import time
+    import threading
+    from flask import Flask, request, jsonify
+    from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+    logger.info("✅ Imports básicos cargados")
+except Exception as e:
+    logger.error(f"❌ Error en imports básicos: {e}")
+    sys.exit(1)
+
+# === IMPORTS CON FALLBACK (CON LOGS) ===
 try:
     from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, get_connection
     MEMORY_AVAILABLE = True
-except ImportError:
+    logger.info("✅ core.memory cargado")
+except Exception as e:
+    logger.warning(f"⚠️ core.memory no disponible: {e}")
     MEMORY_AVAILABLE = False
 
 try:
     from core.classifier import clasificador
     CLASSIFIER_AVAILABLE = True
-except ImportError:
+    logger.info("✅ core.classifier cargado")
+except Exception as e:
+    logger.warning(f"⚠️ core.classifier no disponible: {e}")
     CLASSIFIER_AVAILABLE = False
 
 try:
     from core.orchestrator import orquestar
     ORCHESTRATOR_AVAILABLE = True
-except ImportError:
+    logger.info("✅ core.orchestrator cargado")
+except Exception as e:
+    logger.warning(f"⚠️ core.orchestrator no disponible: {e}")
     ORCHESTRATOR_AVAILABLE = False
 
 try:
     from core.strategist import estratega
     STRATEGIST_AVAILABLE = True
-except ImportError:
+    logger.info("✅ core.strategist cargado")
+except Exception as e:
+    logger.warning(f"⚠️ core.strategist no disponible: {e}")
     STRATEGIST_AVAILABLE = False
 
 try:
     from utils.web import obtener_tasa, buscar_noticias, buscar_en_web
     WEB_AVAILABLE = True
-except ImportError:
+    logger.info("✅ utils.web cargado")
+except Exception as e:
+    logger.warning(f"⚠️ utils.web no disponible: {e}")
     WEB_AVAILABLE = False
 
 try:
     from utils.media import generar_imagen, generar_audio, transcribir_audio
     MEDIA_AVAILABLE = True
-except ImportError:
+    logger.info("✅ utils.media cargado")
+except Exception as e:
+    logger.warning(f"⚠️ utils.media no disponible: {e}")
     MEDIA_AVAILABLE = False
 
 # ==================== CONFIGURACIÓN ====================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN no configurado en variables de entorno.")
+    logger.error("❌ TELEGRAM_TOKEN no configurado")
+    sys.exit(1)
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+try:
+    bot = telebot.TeleBot(TELEGRAM_TOKEN)
+    logger.info("✅ Bot de Telegram inicializado")
+except Exception as e:
+    logger.error(f"❌ Error inicializando bot: {e}")
+    sys.exit(1)
+
 modo_analisis = {}
 
 # ==================== FUNCIONES AUXILIARES ====================
@@ -75,11 +99,9 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
-    """Configura el webhook UNA SOLA VEZ."""
     if os.environ.get("WEBHOOK_CONFIGURED") == "true":
         logger.info("⏭️ Webhook ya configurado, saltando...")
         return True
-    
     url = "https://guaribe-beta.onrender.com/webhook"
     for i in range(3):
         try:
@@ -116,7 +138,6 @@ def cmd_status(m):
     if str(chat_id) != ADMIN_CHAT_ID:
         bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
         return
-
     status_msg = "📁 *ESTADO DE GUARIBE BETA*\n\n"
     status_msg += "✅ *Módulos disponibles:*\n"
     status_msg += f"   {'✅' if MEMORY_AVAILABLE else '❌'} Memoria\n"
@@ -154,9 +175,7 @@ def handle_message(m):
     texto = m.text or ""
     if not texto or len(texto) < 2:
         return
-
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
-
     try:
         # --- SALUDOS ---
         if texto.lower() in ["hola", "buenas", "hey", "saludos", "epa"]:
@@ -311,4 +330,6 @@ if __name__ == "__main__":
     app.run(host='0.0.0.0', port=port)
 else:
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
+    # No configuramos webhook aquí para evitar bloqueos
+    # Se hará manualmente con /set_webhook
     logger.info("✅ Servidor listo para recibir peticiones")
