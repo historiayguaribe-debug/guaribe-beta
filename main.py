@@ -2,68 +2,95 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
-# === FUERZA 1 WORKER PARA AHORRAR MEMORIA ===
-os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
-os.environ["WEB_CONCURRENCY"] = "1"
-
 import time
 import telebot
 import logging
 import threading
+import requests
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== IMPORTS CON FALLBACK ====================
-# Intentamos importar los módulos de core y utils. Si fallan, los desactivamos.
+# ==================== FUERZA 1 WORKER ====================
+os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
+os.environ["WEB_CONCURRENCY"] = "1"
 
-MEMORY_AVAILABLE = False
-CLASSIFIER_AVAILABLE = False
-ORCHESTRATOR_AVAILABLE = False
-STRATEGIST_AVAILABLE = False
-WEB_AVAILABLE = False
-MEDIA_AVAILABLE = False
+# ==================== FUNCIONES DE UTILS/WEB (integradas) ====================
+def obtener_tasa():
+    try:
+        r = requests.get("https://ve.dolarapi.com/v1/dolares", timeout=10)
+        if r.status_code == 200:
+            for item in r.json():
+                if item.get("fuente") == "oficial":
+                    return f"💰 *Tasa oficial BCV:* {item['promedio']} Bs/USD"
+        return "💰 No pude obtener la tasa."
+    except:
+        return "💰 Error al consultar la tasa."
 
+def buscar_noticias():
+    fuentes = [
+        ("El Universal", "https://www.eluniversal.com/rss"),
+        ("VTV", "https://www.vtv.gob.ve/feed"),
+        ("Correo del Orinoco", "https://www.correodelorinoco.gob.ve/feed"),
+        ("AVN", "https://www.avn.info.ve/feed"),
+        ("TeleSUR", "https://www.telesurtv.net/rss"),
+    ]
+    noticias = []
+    for nombre, url in fuentes:
+        try:
+            soup = BeautifulSoup(requests.get(url, timeout=10).text, 'xml')
+            for item in soup.find_all('item')[:2]:
+                titulo = item.find('title').text if item.find('title') else ""
+                if titulo and len(titulo) > 10:
+                    t = titulo.replace("Venezuela", "").strip() or titulo
+                    if len(t) > 100:
+                        t = t[:97] + "..."
+                    noticias.append(f"▪️ {t} ({nombre})")
+        except:
+            continue
+    return "📰 **Noticias de Venezuela**\n\n" + "\n".join(noticias[:10]) if noticias else "📰 No encontré noticias."
+
+def buscar_en_web(consulta: str, limite: int = 3) -> list:
+    try:
+        url = f"https://lite.duckduckgo.com/lite/?q={consulta.replace(' ', '+')}"
+        soup = BeautifulSoup(requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0'
+        }).text, 'html.parser')
+        resultados = []
+        for a in soup.find_all('a'):
+            texto = a.get_text().strip()
+            if 40 < len(texto) < 300 and texto not in resultados:
+                resultados.append(texto[:180])
+                if len(resultados) >= limite:
+                    break
+        return resultados
+    except:
+        return []
+
+# ==================== IMPORTS DE CORE CON FALLBACK ====================
 try:
     from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, get_connection
     MEMORY_AVAILABLE = True
-    logging.info("✅ core.memory cargado")
-except ImportError as e:
-    logging.warning(f"⚠️ core.memory no disponible: {e}")
+except ImportError:
+    MEMORY_AVAILABLE = False
 
 try:
     from core.classifier import clasificador
     CLASSIFIER_AVAILABLE = True
-    logging.info("✅ core.classifier cargado")
-except ImportError as e:
-    logging.warning(f"⚠️ core.classifier no disponible: {e}")
+except ImportError:
+    CLASSIFIER_AVAILABLE = False
 
 try:
     from core.orchestrator import orquestar
     ORCHESTRATOR_AVAILABLE = True
-    logging.info("✅ core.orchestrator cargado")
-except ImportError as e:
-    logging.warning(f"⚠️ core.orchestrator no disponible: {e}")
+except ImportError:
+    ORCHESTRATOR_AVAILABLE = False
 
 try:
     from core.strategist import estratega
     STRATEGIST_AVAILABLE = True
-    logging.info("✅ core.strategist cargado")
-except ImportError as e:
-    logging.warning(f"⚠️ core.strategist no disponible: {e}")
-
-try:
-    from utils.web import obtener_tasa, buscar_noticias, buscar_en_web
-    WEB_AVAILABLE = True
-    logging.info("✅ utils.web cargado")
-except ImportError as e:
-    logging.warning(f"⚠️ utils.web no disponible: {e}")
-
-try:
-    from utils.media import generar_imagen, generar_audio, transcribir_audio
-    MEDIA_AVAILABLE = True
-    logging.info("✅ utils.media cargado")
-except ImportError as e:
-    logging.warning(f"⚠️ utils.media no disponible: {e}")
+except ImportError:
+    STRATEGIST_AVAILABLE = False
 
 # ==================== CONFIGURACIÓN ====================
 logging.basicConfig(level=logging.INFO)
@@ -80,7 +107,6 @@ modo_analisis = {}
 
 # ==================== FUNCIONES AUXILIARES ====================
 def menu_principal():
-    """Crea el teclado personalizado con los botones principales."""
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
         KeyboardButton("💰 Tasa BCV"),
@@ -91,11 +117,9 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
-    """Configura el webhook UNA SOLA VEZ usando variable de entorno."""
     if os.environ.get("WEBHOOK_CONFIGURED") == "true":
         logger.info("⏭️ Webhook ya configurado, saltando...")
         return True
-    
     url = "https://guaribe-beta.onrender.com/webhook"
     for i in range(3):
         try:
@@ -111,7 +135,7 @@ def configurar_webhook():
     logger.error("❌ No se pudo configurar el webhook después de 3 intentos.")
     return False
 
-# ==================== HANDLERS DE TELEGRAM ====================
+# ==================== HANDLERS ====================
 @bot.message_handler(commands=['start'])
 def cmd_start(m):
     bot.send_message(m.chat.id,
@@ -132,15 +156,12 @@ def cmd_status(m):
     if str(chat_id) != ADMIN_CHAT_ID:
         bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
         return
-
     status_msg = "📁 *ESTADO DE GUARIBE BETA*\n\n"
     status_msg += "✅ *Módulos disponibles:*\n"
     status_msg += f"   {'✅' if MEMORY_AVAILABLE else '❌'} Memoria\n"
     status_msg += f"   {'✅' if CLASSIFIER_AVAILABLE else '❌'} Clasificador\n"
     status_msg += f"   {'✅' if ORCHESTRATOR_AVAILABLE else '❌'} Orquestador\n"
     status_msg += f"   {'✅' if STRATEGIST_AVAILABLE else '❌'} Estratega\n"
-    status_msg += f"   {'✅' if WEB_AVAILABLE else '❌'} Web\n"
-    status_msg += f"   {'✅' if MEDIA_AVAILABLE else '❌'} Media\n"
     status_msg += f"\n🌐 Webhook: {'✅' if os.environ.get('WEBHOOK_CONFIGURED') == 'true' else '❌'}\n"
     bot.send_message(chat_id, status_msg, parse_mode='Markdown')
 
@@ -170,59 +191,41 @@ def handle_message(m):
     texto = m.text or ""
     if not texto or len(texto) < 2:
         return
-
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
-
     try:
-        # --- 1. SALUDOS (sin IA) ---
+        # --- SALUDOS ---
         if texto.lower() in ["hola", "buenas", "hey", "saludos", "epa"]:
             bot.send_message(chat_id, "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠")
             return
 
-        # --- 2. ACCIONES RÁPIDAS (tasa, noticias, imagen) ---
-        # Estas funciones son ligeras y no requieren cargar el modelo pesado.
-        if WEB_AVAILABLE:
-            if "tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower():
-                bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
-                return
-            if "noticias" in texto.lower() or "qué pasó" in texto.lower():
-                bot.send_message(chat_id, buscar_noticias(), parse_mode='Markdown')
-                return
+        # --- ACCIONES RÁPIDAS ---
+        if "tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower():
+            bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
+            return
+        if "noticias" in texto.lower() or "qué pasó" in texto.lower():
+            bot.send_message(chat_id, buscar_noticias(), parse_mode='Markdown')
+            return
 
-        if MEDIA_AVAILABLE:
-            if "genera" in texto.lower() and ("imagen" in texto.lower() or "dibujo" in texto.lower()):
-                bot.send_message(chat_id, "🎨 Generando imagen...")
-                img = generar_imagen(texto)
-                if img:
-                    bot.send_photo(chat_id, img, caption=f"🎨 *{texto[:50]}...*", parse_mode='Markdown')
-                else:
-                    bot.send_message(chat_id, "❌ No pude generar la imagen.")
-                return
-
-        # --- 3. MODO ANÁLISIS (activado por el botón) ---
+        # --- MODO ANÁLISIS ---
         if chat_id in modo_analisis and modo_analisis[chat_id]:
             modo_analisis[chat_id] = False
             tema = texto
             bot.send_message(chat_id, f"📊 Analizando: {tema[:50]}...")
-            if WEB_AVAILABLE:
-                contexto_web = buscar_en_web(tema, 3)
-                contexto_texto = "\n".join(contexto_web) if contexto_web else ""
-            else:
-                contexto_texto = ""
+            contexto_web = buscar_en_web(tema, 3)
+            contexto_texto = "\n".join(contexto_web) if contexto_web else ""
             if ORCHESTRATOR_AVAILABLE:
-                # Nota: orquestar podría cargar el modelo de memoria si lo necesita, pero solo aquí.
                 respuesta = orquestar(tema, "compleja", [contexto_texto] if contexto_texto else [], {})
                 bot.send_message(chat_id, respuesta, parse_mode='Markdown')
             else:
                 bot.send_message(chat_id, f"🔮 Análisis en construcción. Tema: '{tema}'")
             return
 
-        # --- 4. BOTONES (son capturados aquí después de las acciones rápidas) ---
+        # --- BOTONES ---
         if texto == "💰 Tasa BCV":
-            bot.send_message(chat_id, obtener_tasa() if WEB_AVAILABLE else "⚠️ No disponible.")
+            bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
             return
         if texto == "📰 Noticias":
-            bot.send_message(chat_id, buscar_noticias() if WEB_AVAILABLE else "⚠️ No disponible.")
+            bot.send_message(chat_id, buscar_noticias(), parse_mode='Markdown')
             return
         if texto == "🔮 Analizar":
             modo_analisis[chat_id] = True
@@ -232,8 +235,7 @@ def handle_message(m):
             bot.send_message(chat_id, "🎙️ Pronto podré responderte con audio.")
             return
 
-        # --- 5. RESPUESTA CON ORQUESTADOR (para mensajes complejos) ---
-        # Esta es la parte que podría activar la memoria, el clasificador, etc.
+        # --- RESPUESTA CON ORQUESTADOR ---
         categoria = "simple"
         if CLASSIFIER_AVAILABLE:
             categoria = clasificador.clasificar(texto)
@@ -241,8 +243,6 @@ def handle_message(m):
         contexto = []
         if MEMORY_AVAILABLE:
             try:
-                # NOTA: get_connection() y buscar_contexto() pueden cargar el modelo de embeddings
-                # la primera vez que se llamen, pero eso será bajo demanda.
                 conn = get_connection()
                 contexto = buscar_contexto(chat_id, texto, conn) + buscar_resumenes(chat_id, texto, conn)
                 conn.close()
@@ -252,13 +252,11 @@ def handle_message(m):
         if ORCHESTRATOR_AVAILABLE:
             respuesta = orquestar(texto, categoria, contexto, {})
         else:
-            # FALLBACK: respuesta tipo "Pong" si no hay orquestador
             respuesta = f"🏓 Pong! Recibí: {texto}\n\n(Modo orquestador no disponible)"
 
-        # --- ENVIAR RESPUESTA ---
         sent_msg = bot.send_message(chat_id, respuesta, parse_mode='Markdown')
 
-        # --- FEEDBACK (botones de calificación) ---
+        # --- FEEDBACK ---
         markup = InlineKeyboardMarkup()
         markup.add(
             InlineKeyboardButton("👍", callback_data=f"fb_{sent_msg.message_id}_1"),
@@ -266,20 +264,19 @@ def handle_message(m):
         )
         bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
 
-        # --- GUARDAR EN MEMORIA (en un hilo para no bloquear) ---
+        # --- GUARDAR EN MEMORIA ---
         if MEMORY_AVAILABLE:
             def guardar():
                 try:
-                    # Aquí es donde se cargará el modelo de embeddings si no se ha cargado antes
                     conn = get_connection()
                     guardar_mensaje(chat_id, "usuario", texto, conn)
                     guardar_mensaje(chat_id, "asistente", respuesta, conn)
                     conn.close()
                 except Exception as e:
-                    logger.warning(f"Error guardando en memoria: {e}")
+                    logger.warning(f"Error guardando: {e}")
             threading.Thread(target=guardar).start()
 
-        # --- ESTRATEGA (aprender patrones, en segundo plano) ---
+        # --- ESTRATEGA ---
         if STRATEGIST_AVAILABLE:
             try:
                 estratega.aprender(chat_id, texto, respuesta)
@@ -294,18 +291,17 @@ def handle_message(m):
         logger.error(f"Error en handle_message: {e}")
         bot.send_message(chat_id, "Pana, hubo un error. Intenta de nuevo. 🙏")
 
-# ==================== FEEDBACK (callbacks de los botones) ====================
+# ==================== FEEDBACK ====================
 @bot.callback_query_handler(func=lambda call: call.data.startswith('fb_'))
 def handle_feedback(call):
     try:
         _, msg_id, puntuacion = call.data.split('_')
-        # Aquí podríamos guardar el feedback en la base de datos para mejorar el clasificador
         bot.answer_callback_query(call.id, "¡Gracias por tu feedback! 👍")
         bot.edit_message_reply_markup(call.message.chat.id, int(msg_id), reply_markup=None)
     except Exception as e:
         logger.error(f"Error en feedback: {e}")
 
-# ==================== APLICACIÓN FLASK ====================
+# ==================== FLASK ====================
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
@@ -335,10 +331,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 else:
-    # ==== PRODUCCIÓN ====
-    # El webhook ya se configurará en la primera solicitud o al iniciar.
-    # No bloqueamos el arranque con configurar_webhook() aquí.
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
-    # Intentamos configurar el webhook en segundo plano para no bloquear el arranque
-    threading.Thread(target=configurar_webhook).start()
     logger.info("✅ Servidor listo para recibir peticiones")
