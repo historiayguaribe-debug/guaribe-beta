@@ -2,90 +2,83 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
-import sys
-import logging
+os.environ["GUNICORN_CMD_ARGS"] = "--workers 1 --timeout 120"
+os.environ["WEB_CONCURRENCY"] = "1"
 
-# === CONFIGURAR LOGGING PARA QUE MUESTRE ERRORES DETALLADOS ===
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+import time
+import telebot
+import logging
+import threading
+from flask import Flask, request, jsonify
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+
+# ==================== CONFIGURACIÓN DE LOGGING ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# === CAPTURAR ERRORES DE IMPORTACIÓN ===
-try:
-    import telebot
-    import time
-    import threading
-    from flask import Flask, request, jsonify
-    from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-    logger.info("✅ Imports básicos cargados")
-except Exception as e:
-    logger.error(f"❌ Error en imports básicos: {e}")
-    sys.exit(1)
+# ==================== IMPORTS CON FALLBACK ====================
+logger.info("🔄 Cargando módulos core...")
 
-# === IMPORTS CON FALLBACK (CON LOGS) ===
 try:
     from core.memory import guardar_mensaje, buscar_contexto, buscar_resumenes, get_connection
     MEMORY_AVAILABLE = True
-    logger.info("✅ core.memory cargado")
-except Exception as e:
+except ImportError as e:
     logger.warning(f"⚠️ core.memory no disponible: {e}")
     MEMORY_AVAILABLE = False
 
 try:
     from core.classifier import clasificador
     CLASSIFIER_AVAILABLE = True
-    logger.info("✅ core.classifier cargado")
-except Exception as e:
+except ImportError as e:
     logger.warning(f"⚠️ core.classifier no disponible: {e}")
     CLASSIFIER_AVAILABLE = False
 
 try:
     from core.orchestrator import orquestar
     ORCHESTRATOR_AVAILABLE = True
-    logger.info("✅ core.orchestrator cargado")
-except Exception as e:
+except ImportError as e:
     logger.warning(f"⚠️ core.orchestrator no disponible: {e}")
     ORCHESTRATOR_AVAILABLE = False
 
 try:
     from core.strategist import estratega
     STRATEGIST_AVAILABLE = True
-    logger.info("✅ core.strategist cargado")
-except Exception as e:
+except ImportError as e:
     logger.warning(f"⚠️ core.strategist no disponible: {e}")
     STRATEGIST_AVAILABLE = False
 
 try:
     from utils.web import obtener_tasa, buscar_noticias, buscar_en_web
     WEB_AVAILABLE = True
-    logger.info("✅ utils.web cargado")
-except Exception as e:
+except ImportError as e:
     logger.warning(f"⚠️ utils.web no disponible: {e}")
     WEB_AVAILABLE = False
 
 try:
     from utils.media import generar_imagen, generar_audio, transcribir_audio
     MEDIA_AVAILABLE = True
-    logger.info("✅ utils.media cargado")
-except Exception as e:
+except ImportError as e:
     logger.warning(f"⚠️ utils.media no disponible: {e}")
     MEDIA_AVAILABLE = False
+
+logger.info("✅ Imports básicos cargados")
 
 # ==================== CONFIGURACIÓN ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
 if not TELEGRAM_TOKEN:
-    logger.error("❌ TELEGRAM_TOKEN no configurado")
-    sys.exit(1)
+    raise ValueError("❌ TELEGRAM_TOKEN no configurado en variables de entorno.")
 
-try:
-    bot = telebot.TeleBot(TELEGRAM_TOKEN)
-    logger.info("✅ Bot de Telegram inicializado")
-except Exception as e:
-    logger.error(f"❌ Error inicializando bot: {e}")
-    sys.exit(1)
+logger.info("✅ Token de Telegram verificado")
 
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 modo_analisis = {}
+
+logger.info("✅ Bot de Telegram inicializado")
 
 # ==================== FUNCIONES AUXILIARES ====================
 def menu_principal():
@@ -99,9 +92,11 @@ def menu_principal():
     return markup
 
 def configurar_webhook():
+    """Configura el webhook UNA SOLA VEZ."""
     if os.environ.get("WEBHOOK_CONFIGURED") == "true":
         logger.info("⏭️ Webhook ya configurado, saltando...")
         return True
+    
     url = "https://guaribe-beta.onrender.com/webhook"
     for i in range(3):
         try:
@@ -300,7 +295,10 @@ def handle_feedback(call):
         logger.error(f"Error en feedback: {e}")
 
 # ==================== FLASK ====================
+logger.info("📦 Creando app Flask...")
 app = Flask(__name__)
+
+logger.info("📦 Registrando rutas Flask...")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -322,14 +320,18 @@ def set_webhook():
         return jsonify({"status": "ok", "message": "Webhook configurado"}), 200
     return jsonify({"status": "error", "message": "Falló configuración"}), 500
 
+logger.info("✅ Rutas Flask registradas")
+
 # ==================== EJECUCIÓN ====================
 if __name__ == "__main__":
     logger.info("🚀 Iniciando Guaribe (modo desarrollo)...")
     configurar_webhook()
     port = int(os.environ.get("PORT", 10000))
+    logger.info(f"📡 Escuchando en puerto {port}...")
     app.run(host='0.0.0.0', port=port)
 else:
+    # ==== PRODUCCIÓN: NO CONFIGURAR WEBHOOK AUTOMÁTICAMENTE ====
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
-    # No configuramos webhook aquí para evitar bloqueos
-    # Se hará manualmente con /set_webhook
     logger.info("✅ Servidor listo para recibir peticiones")
+    # El webhook se configurará manualmente desde /set_webhook
+   
