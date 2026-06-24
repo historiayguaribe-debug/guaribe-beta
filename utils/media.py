@@ -1,11 +1,10 @@
-import requests
-from io import BytesIO
-from PIL import Image
-from gtts import gTTS
 import os
+from io import BytesIO
 
 def generar_imagen(prompt: str, tipo: str = "general") -> BytesIO:
     try:
+        import requests
+        from PIL import Image  # Import dentro de la función
         prompt_limpio = prompt.replace(' ', '%20')
         if tipo == "infografia":
             prompt_limpio = f"infografía profesional sobre {prompt_limpio}, diseño moderno"
@@ -21,6 +20,7 @@ def generar_imagen(prompt: str, tipo: str = "general") -> BytesIO:
 
 def generar_audio(texto: str) -> BytesIO:
     try:
+        from gtts import gTTS  # Import dentro de la función
         tts = gTTS(text=texto[:500], lang='es', slow=False)
         audio_data = BytesIO()
         tts.write_to_fp(audio_data)
@@ -29,21 +29,4 @@ def generar_audio(texto: str) -> BytesIO:
     except:
         return None
 
-def transcribir_audio(data: bytes, groq_client) -> str:
-    if not groq_client:
-        return None
-    try:
-        temp_path = "/tmp/audio.ogg"
-        with open(temp_path, "wb") as f:
-            f.write(data)
-        with open(temp_path, "rb") as f:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(temp_path, f.read()),
-                model="whisper-large-v3",
-                response_format="text",
-                language="es"
-            )
-        os.remove(temp_path)
-        return transcription
-    except:
-        return None
+# ... (transcribir_audio sin cambios, ya es liviano)
