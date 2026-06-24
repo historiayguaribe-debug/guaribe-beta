@@ -70,13 +70,9 @@ except ImportError:
     WEB_AVAILABLE = False
     logger.warning("⚠️ utils.web no disponible")
 
-# Media
-try:
-    from utils.media import generar_imagen, generar_audio, transcribir_audio
-    MEDIA_AVAILABLE = True
-except ImportError:
-    MEDIA_AVAILABLE = False
-    logger.warning("⚠️ utils.media no disponible")
+# Media (desactivado para prueba)
+MEDIA_AVAILABLE = False
+logger.info("⏸️ Funciones de imagen y voz desactivadas para prueba")
 
 # ==================== CONFIGURACIÓN DEL BOT ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -88,19 +84,16 @@ if not TELEGRAM_TOKEN:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 modo_analisis = {}
 
-# ==================== FUNCIONES AUXILIARES ====================
+# ==================== MENÚ PRINCIPAL ====================
 def menu_principal():
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup = ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
     markup.add(
-        KeyboardButton("💰 Tasa BCV"),
-        KeyboardButton("📰 Noticias"),
-        KeyboardButton("🔮 Analizar"),
-        KeyboardButton("🎙️ Voz")
+        KeyboardButton("💰 Tasa BCV")
     )
     return markup
 
+# ==================== FUNCIONES AUXILIARES ====================
 def configurar_webhook():
-    """Configura el webhook UNA SOLA VEZ."""
     if os.environ.get("WEBHOOK_CONFIGURED") == "true":
         logger.info("⏭️ Webhook ya configurado, saltando...")
         return True
@@ -125,11 +118,11 @@ def configurar_webhook():
 def cmd_start(m):
     bot.send_message(m.chat.id,
         "¡Epale! Soy **Guaribe**, tu asistente llanero.\n\n"
-        "Usa los botones:\n"
-        "💰 Tasa BCV\n📰 Noticias\n🔮 Analizar\n🎙️ Voz\n\n"
-        "🎨 Puedes pedirme imágenes, infografías o logos.\n"
-        "📸 Envía fotos para que las analice.\n"
-        "🎙️ Envía mensajes de voz.\n"
+        "Usa el botón:\n"
+        "💰 Tasa BCV\n\n"
+        "📰 Escribe 'noticias' o 'qué pasó hoy'.\n"
+        "🔮 Escribe 'analiza' más un tema.\n"
+        "❌ Funciones de imagen y voz desactivadas para prueba.\n"
         "👍/👎 Califica mis respuestas.\n\n"
         "¡Seguimos razonando! 🇻🇪🤠🏛️",
         parse_mode='Markdown', reply_markup=menu_principal()
@@ -142,14 +135,14 @@ def cmd_status(m):
         bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
         return
 
-    status_msg = "📁 *ESTADO DE GUARIBE BETA*\n\n"
+    status_msg = "📁 *ESTADO DE GUARIBE BETA (PRUEBA)*\n\n"
     status_msg += "✅ *Módulos disponibles:*\n"
     status_msg += f"   {'✅' if MEMORY_AVAILABLE else '❌'} Memoria\n"
     status_msg += f"   {'✅' if CLASSIFIER_AVAILABLE else '❌'} Clasificador\n"
     status_msg += f"   {'✅' if ORCHESTRATOR_AVAILABLE else '❌'} Orquestador\n"
     status_msg += f"   {'✅' if STRATEGIST_AVAILABLE else '❌'} Estratega\n"
     status_msg += f"   {'✅' if WEB_AVAILABLE else '❌'} Web\n"
-    status_msg += f"   {'✅' if MEDIA_AVAILABLE else '❌'} Media\n"
+    status_msg += f"   {'⏸️' if not MEDIA_AVAILABLE else '❌'} Imagen/Voz (desactivado para prueba)\n"
     status_msg += f"\n🌐 Webhook: {'✅' if os.environ.get('WEBHOOK_CONFIGURED') == 'true' else '❌'}\n"
     bot.send_message(chat_id, status_msg, parse_mode='Markdown')
 
@@ -172,7 +165,7 @@ def cmd_admin_clean(m):
     except Exception as e:
         bot.send_message(m.chat.id, f"❌ Error: {e}")
 
-# ==================== HANDLER PRINCIPAL (CORREGIDO) ====================
+# ==================== HANDLER PRINCIPAL ====================
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     chat_id = m.chat.id
@@ -183,35 +176,29 @@ def handle_message(m):
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
 
     try:
-        # --- SALUDOS MUY BÁSICOS (sin IA) ---
+        # --- SALUDOS MUY BÁSICOS ---
         if texto.lower() in ["hola", "epa", "hey"]:
             bot.send_message(chat_id, "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠")
             return
 
-        # --- ACCIONES RÁPIDAS (tasa, noticias, imagen) ---
-        if WEB_AVAILABLE:
-            if "tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower():
-                bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
-                return
-            if "noticias" in texto.lower() or "qué pasó" in texto.lower():
-                noticias = buscar_noticias()
-                bot.send_message(chat_id, noticias, parse_mode='Markdown')
-                return
+        # --- TASA BCV ---
+        if WEB_AVAILABLE and ("tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower()):
+            bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
+            return
 
-        if MEDIA_AVAILABLE:
-            if "genera" in texto.lower() and ("imagen" in texto.lower() or "dibujo" in texto.lower()):
-                bot.send_message(chat_id, "🎨 Generando imagen... (puede tomar unos segundos)")
-                img = generar_imagen(texto)
-                if img:
-                    bot.send_photo(chat_id, img, caption=f"🎨 *{texto[:50]}...*", parse_mode='Markdown')
-                else:
-                    bot.send_message(chat_id, "❌ No pude generar la imagen. Intenta con otro prompt.")
-                return
+        # --- NOTICIAS (por lenguaje natural) ---
+        if WEB_AVAILABLE and ("noticias" in texto.lower() or "qué pasó" in texto.lower() or "actualidad" in texto.lower()):
+            bot.send_message(chat_id, "📰 Buscando noticias...")
+            noticias = buscar_noticias()
+            bot.send_message(chat_id, noticias, parse_mode='Markdown')
+            return
 
-        # --- MODO ANÁLISIS ---
-        if chat_id in modo_analisis and modo_analisis[chat_id]:
-            modo_analisis[chat_id] = False
-            tema = texto
+        # --- MODO ANÁLISIS (por lenguaje natural) ---
+        if "analizar" in texto.lower() or "analiza" in texto.lower():
+            tema = texto.replace("analizar", "").replace("analiza", "").strip()
+            if not tema:
+                bot.send_message(chat_id, "🔮 Envíame el tema a analizar.")
+                return
             bot.send_message(chat_id, f"📊 Analizando: {tema[:50]}...")
             if WEB_AVAILABLE:
                 contexto_web = buscar_en_web(tema, 3)
@@ -225,26 +212,16 @@ def handle_message(m):
                 bot.send_message(chat_id, f"🔮 Análisis en construcción. Tema: '{tema}'")
             return
 
-        # --- BOTONES ---
+        # --- BOTÓN TASA ---
         if texto == "💰 Tasa BCV":
-            bot.send_message(chat_id, obtener_tasa() if WEB_AVAILABLE else "⚠️ No disponible.")
-            return
-        if texto == "📰 Noticias":
-            bot.send_message(chat_id, buscar_noticias() if WEB_AVAILABLE else "⚠️ No disponible.")
-            return
-        if texto == "🔮 Analizar":
-            modo_analisis[chat_id] = True
-            bot.send_message(chat_id, "🔮 Envíame el tema a analizar.")
-            return
-        if texto == "🎙️ Voz":
-            bot.send_message(chat_id, "🎙️ Pronto podré responderte con audio.")
+            bot.send_message(chat_id, obtener_tasa() if WEB_AVAILABLE else "⚠️ No disponible.", parse_mode='Markdown')
             return
 
-        # --- CARGAR MEMORIA SI ES NECESARIO ---
-        if not MEMORY_AVAILABLE:
+        # --- CARGA DE MEMORIA (si es necesario) ---
+        if not MEMORY_AVAILABLE and ORCHESTRATOR_AVAILABLE:
             cargar_memoria()
 
-        # --- RESPUESTA CON ORQUESTADOR (para todo lo demás) ---
+        # --- RESPUESTA CON ORQUESTADOR ---
         categoria = "simple"
         if CLASSIFIER_AVAILABLE:
             categoria = clasificador.clasificar(texto)
@@ -325,7 +302,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe Beta - Prueba sin imágenes/voz"}), 200
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
