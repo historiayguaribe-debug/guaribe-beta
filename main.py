@@ -38,13 +38,20 @@ def cargar_memoria():
         except ImportError as e:
             logger.warning(f"⚠️ Memoria no disponible: {e}")
 
-# Clasificador
-try:
-    from core.classifier import clasificador
-    CLASSIFIER_AVAILABLE = True
-except ImportError:
-    CLASSIFIER_AVAILABLE = False
-    logger.warning("⚠️ Clasificador no disponible")
+# Clasificador (se carga bajo demanda)
+CLASSIFIER_AVAILABLE = False
+clasificador = None
+
+def cargar_clasificador():
+    global CLASSIFIER_AVAILABLE, clasificador
+    if not CLASSIFIER_AVAILABLE:
+        try:
+            from core.classifier import clasificador as _clf
+            clasificador = _clf
+            CLASSIFIER_AVAILABLE = True
+            logger.info("✅ Clasificador cargado bajo demanda")
+        except ImportError as e:
+            logger.warning(f"⚠️ Clasificador no disponible: {e}")
 
 # Orquestador
 try:
@@ -62,17 +69,43 @@ except ImportError:
     STRATEGIST_AVAILABLE = False
     logger.warning("⚠️ Estratega no disponible")
 
-# Web
-try:
-    from utils.web import obtener_tasa, buscar_noticias, buscar_en_web
-    WEB_AVAILABLE = True
-except ImportError:
-    WEB_AVAILABLE = False
-    logger.warning("⚠️ utils.web no disponible")
+# Web (se carga bajo demanda)
+WEB_AVAILABLE = False
+obtener_tasa = None
+buscar_noticias = None
+buscar_en_web = None
 
-# Media (desactivado para prueba)
+def cargar_web():
+    global WEB_AVAILABLE, obtener_tasa, buscar_noticias, buscar_en_web
+    if not WEB_AVAILABLE:
+        try:
+            from utils.web import obtener_tasa as _ot, buscar_noticias as _bn, buscar_en_web as _bw
+            obtener_tasa = _ot
+            buscar_noticias = _bn
+            buscar_en_web = _bw
+            WEB_AVAILABLE = True
+            logger.info("✅ Módulo web cargado bajo demanda")
+        except ImportError as e:
+            logger.warning(f"⚠️ utils.web no disponible: {e}")
+
+# Media (se carga bajo demanda)
 MEDIA_AVAILABLE = False
-logger.info("⏸️ Funciones de imagen y voz desactivadas para prueba")
+generar_imagen = None
+generar_audio = None
+transcribir_audio = None
+
+def cargar_media():
+    global MEDIA_AVAILABLE, generar_imagen, generar_audio, transcribir_audio
+    if not MEDIA_AVAILABLE:
+        try:
+            from utils.media import generar_imagen as _gi, generar_audio as _ga, transcribir_audio as _ta
+            generar_imagen = _gi
+            generar_audio = _ga
+            transcribir_audio = _ta
+            MEDIA_AVAILABLE = True
+            logger.info("✅ Módulo media cargado bajo demanda")
+        except ImportError as e:
+            logger.warning(f"⚠️ utils.media no disponible: {e}")
 
 # ==================== CONFIGURACIÓN DEL BOT ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -86,9 +119,10 @@ modo_analisis = {}
 
 # ==================== MENÚ PRINCIPAL ====================
 def menu_principal():
-    markup = ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
-        KeyboardButton("💰 Tasa BCV")
+        KeyboardButton("💰 Tasa BCV"),
+        KeyboardButton("🎙️ Voz")
     )
     return markup
 
@@ -97,7 +131,6 @@ def configurar_webhook():
     if os.environ.get("WEBHOOK_CONFIGURED") == "true":
         logger.info("⏭️ Webhook ya configurado, saltando...")
         return True
-    
     url = "https://guaribe-beta.onrender.com/webhook"
     for i in range(3):
         try:
@@ -118,11 +151,13 @@ def configurar_webhook():
 def cmd_start(m):
     bot.send_message(m.chat.id,
         "¡Epale! Soy **Guaribe**, tu asistente llanero.\n\n"
-        "Usa el botón:\n"
-        "💰 Tasa BCV\n\n"
-        "📰 Escribe 'noticias' o 'qué pasó hoy'.\n"
-        "🔮 Escribe 'analiza' más un tema.\n"
-        "❌ Funciones de imagen y voz desactivadas para prueba.\n"
+        "Usa los botones:\n"
+        "💰 Tasa BCV\n🎙️ Voz\n\n"
+        "🎨 Puedes pedirme imágenes con 'genera una imagen de...'.\n"
+        "📰 Para noticias escribe 'noticias' o 'qué pasó hoy'.\n"
+        "🔮 Para análisis escribe 'analiza' o 'analizar'.\n"
+        "📸 Envía fotos para que las analice.\n"
+        "🎙️ Envía mensajes de voz.\n"
         "👍/👎 Califica mis respuestas.\n\n"
         "¡Seguimos razonando! 🇻🇪🤠🏛️",
         parse_mode='Markdown', reply_markup=menu_principal()
@@ -135,14 +170,14 @@ def cmd_status(m):
         bot.send_message(chat_id, "⛔ Este comando es solo para administradores.")
         return
 
-    status_msg = "📁 *ESTADO DE GUARIBE BETA (PRUEBA)*\n\n"
+    status_msg = "📁 *ESTADO DE GUARIBE BETA*\n\n"
     status_msg += "✅ *Módulos disponibles:*\n"
-    status_msg += f"   {'✅' if MEMORY_AVAILABLE else '❌'} Memoria\n"
-    status_msg += f"   {'✅' if CLASSIFIER_AVAILABLE else '❌'} Clasificador\n"
+    status_msg += f"   {'✅' if MEMORY_AVAILABLE else '⏳'} Memoria\n"
+    status_msg += f"   {'✅' if CLASSIFIER_AVAILABLE else '⏳'} Clasificador\n"
     status_msg += f"   {'✅' if ORCHESTRATOR_AVAILABLE else '❌'} Orquestador\n"
     status_msg += f"   {'✅' if STRATEGIST_AVAILABLE else '❌'} Estratega\n"
-    status_msg += f"   {'✅' if WEB_AVAILABLE else '❌'} Web\n"
-    status_msg += f"   {'⏸️' if not MEDIA_AVAILABLE else '❌'} Imagen/Voz (desactivado para prueba)\n"
+    status_msg += f"   {'✅' if WEB_AVAILABLE else '⏳'} Web\n"
+    status_msg += f"   {'✅' if MEDIA_AVAILABLE else '⏳'} Media\n"
     status_msg += f"\n🌐 Webhook: {'✅' if os.environ.get('WEBHOOK_CONFIGURED') == 'true' else '❌'}\n"
     bot.send_message(chat_id, status_msg, parse_mode='Markdown')
 
@@ -176,24 +211,50 @@ def handle_message(m):
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
 
     try:
-        # --- SALUDOS MUY BÁSICOS ---
+        # --- SALUDOS MUY BÁSICOS (sin IA) ---
         if texto.lower() in ["hola", "epa", "hey"]:
             bot.send_message(chat_id, "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠")
             return
 
-        # --- TASA BCV ---
+        # --- CARGA DE MÓDULOS BAJO DEMANDA ---
+        # Cargar web solo si es necesario (tasa, noticias)
+        if not WEB_AVAILABLE and ("tasa" in texto.lower() or "bcv" in texto.lower() or 
+                                  "dólar" in texto.lower() or "noticias" in texto.lower() or 
+                                  "qué pasó" in texto.lower() or "actualidad" in texto.lower()):
+            cargar_web()
+
+        # Cargar media solo si es necesario (imagen, audio)
+        if not MEDIA_AVAILABLE and ("genera" in texto.lower() and ("imagen" in texto.lower() or "dibujo" in texto.lower())):
+            cargar_media()
+
+        # Cargar clasificador solo si es necesario (cualquier cosa que no sea saludo)
+        if not CLASSIFIER_AVAILABLE and not texto.lower() in ["hola", "epa", "hey"]:
+            cargar_clasificador()
+
+        # --- ACCIONES RÁPIDAS ---
+        # Tasa BCV
         if WEB_AVAILABLE and ("tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower()):
             bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
             return
 
-        # --- NOTICIAS (por lenguaje natural) ---
+        # Noticias (por lenguaje natural)
         if WEB_AVAILABLE and ("noticias" in texto.lower() or "qué pasó" in texto.lower() or "actualidad" in texto.lower()):
             bot.send_message(chat_id, "📰 Buscando noticias...")
             noticias = buscar_noticias()
             bot.send_message(chat_id, noticias, parse_mode='Markdown')
             return
 
-        # --- MODO ANÁLISIS (por lenguaje natural) ---
+        # Imágenes
+        if MEDIA_AVAILABLE and ("genera" in texto.lower() and ("imagen" in texto.lower() or "dibujo" in texto.lower())):
+            bot.send_message(chat_id, "🎨 Generando imagen... (puede tomar unos segundos)")
+            img = generar_imagen(texto)
+            if img:
+                bot.send_photo(chat_id, img, caption=f"🎨 *{texto[:50]}...*", parse_mode='Markdown')
+            else:
+                bot.send_message(chat_id, "❌ No pude generar la imagen. Intenta con otro prompt.")
+            return
+
+        # Modo análisis (por lenguaje natural)
         if "analizar" in texto.lower() or "analiza" in texto.lower():
             tema = texto.replace("analizar", "").replace("analiza", "").strip()
             if not tema:
@@ -212,18 +273,23 @@ def handle_message(m):
                 bot.send_message(chat_id, f"🔮 Análisis en construcción. Tema: '{tema}'")
             return
 
-        # --- BOTÓN TASA ---
+        # --- BOTONES ---
         if texto == "💰 Tasa BCV":
+            if not WEB_AVAILABLE:
+                cargar_web()
             bot.send_message(chat_id, obtener_tasa() if WEB_AVAILABLE else "⚠️ No disponible.", parse_mode='Markdown')
+            return
+        if texto == "🎙️ Voz":
+            bot.send_message(chat_id, "🎙️ Función de voz activa. Envía un mensaje de voz o recibe respuestas en audio.")
             return
 
         # --- CARGA DE MEMORIA (si es necesario) ---
         if not MEMORY_AVAILABLE and ORCHESTRATOR_AVAILABLE:
             cargar_memoria()
 
-        # --- RESPUESTA CON ORQUESTADOR ---
+        # --- RESPUESTA CON ORQUESTADOR (para todo lo demás) ---
         categoria = "simple"
-        if CLASSIFIER_AVAILABLE:
+        if CLASSIFIER_AVAILABLE and clasificador is not None:
             categoria = clasificador.clasificar(texto)
 
         contexto = []
@@ -302,7 +368,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe Beta - Prueba sin imágenes/voz"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0"}), 200
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
@@ -311,11 +377,21 @@ def set_webhook():
     return jsonify({"status": "error", "message": "Falló configuración"}), 500
 
 # ==================== EJECUCIÓN ====================
+def precargar_memoria():
+    """Precarga la memoria en segundo plano para que esté lista cuando se necesite."""
+    logger.info("🔄 Precargando memoria en segundo plano...")
+    cargar_memoria()
+    logger.info("✅ Memoria precargada")
+
 if __name__ == "__main__":
     logger.info("🚀 Iniciando Guaribe (modo desarrollo)...")
     configurar_webhook()
+    # Precargar memoria en segundo plano
+    threading.Thread(target=precargar_memoria).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 else:
     logger.info("🚀 Iniciando Guaribe (modo producción)...")
+    # Precargar memoria en segundo plano (no bloquea el arranque)
+    threading.Thread(target=precargar_memoria).start()
     logger.info("✅ Servidor listo para recibir peticiones")
