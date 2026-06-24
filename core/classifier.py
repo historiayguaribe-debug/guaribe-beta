@@ -87,5 +87,5 @@ class Clasificador:
                 self.entrenar()
                 self.contador = 0
 
-# === INSTANCIA GLOBAL QUE main.py ESPERA ===
+# === ESTA LÍNEA ES CLAVE ===
 clasificador = Clasificador()
