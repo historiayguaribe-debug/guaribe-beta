@@ -1,26 +1,32 @@
 import os
+import requests
 import logging
-from groq import Groq
 
 logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 def llamar_api(mensajes, categoria="simple"):
-    """Llama a Groq de forma simple."""
+    """Llama a Groq usando requests (sin librería groq)."""
     if not GROQ_API_KEY:
         logger.error("❌ GROQ_API_KEY no configurada")
         return None
 
     try:
-        # Inicializar sin argumentos extra
-        client = Groq(api_key=GROQ_API_KEY)
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=mensajes,
-            max_tokens=500
-        )
-        return response.choices[0].message.content
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": mensajes,
+            "max_tokens": 500
+        }
+        response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error(f"❌ Error en Groq: {e}")
+        logger.error(f"❌ Error en Groq (requests): {e}")
         return None
