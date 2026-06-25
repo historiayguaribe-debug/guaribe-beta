@@ -7,7 +7,7 @@ import telebot
 import logging
 from flask import Flask, request, jsonify
 
-# ==================== LOGGER (BIEN CONFIGURADO) ====================
+# ==================== LOGGER (BIEN DEFINIDO) ====================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
