@@ -53,6 +53,8 @@ def orquestar(consulta: str, categoria: str, contexto: List[str], perfil: Dict) 
     """
     Orquestador distribuido: usa múltiples APIs con failover automático.
     """
+    logger.info("🔄 Entrando al orquestador con categoría: %s", categoria)
+
     # 1. Respuestas rápidas sin IA
     if categoria == "saludo":
         return "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠"
@@ -69,9 +71,13 @@ def orquestar(consulta: str, categoria: str, contexto: List[str], perfil: Dict) 
     ]
 
     # 4. Llamar a las APIs según la categoría
+    logger.info("🔄 Llamando a las APIs para categoría: %s", categoria)
     respuesta = llamar_api(mensajes, categoria)
+    
     if respuesta:
+        logger.info("✅ Orquestador obtuvo respuesta de una API")
         return respuesta
 
     # 5. Último recurso (si todo falla)
+    logger.error("❌ Orquestador: todas las APIs fallaron")
     return "Pana, estoy teniendo un mal día técnico. Intenta más tarde. 🙏"
