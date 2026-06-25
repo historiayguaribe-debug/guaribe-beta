@@ -1,7 +1,6 @@
-# utils/logger.py
 import logging
 
-# Configuración única del logger
+# ==================== CONFIGURACIÓN DEL LOGGER ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
