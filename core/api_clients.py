@@ -1,5 +1,4 @@
 import os
-import requests
 import logging
 from groq import Groq
 
@@ -8,12 +7,13 @@ logger = logging.getLogger(__name__)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 def llamar_api(mensajes, categoria="simple"):
-    """Versión mínima: solo usa Groq."""
+    """Llama a Groq de forma simple."""
     if not GROQ_API_KEY:
         logger.error("❌ GROQ_API_KEY no configurada")
         return None
-    
+
     try:
+        # Inicializar sin argumentos extra
         client = Groq(api_key=GROQ_API_KEY)
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
