@@ -7,7 +7,7 @@ import telebot
 import logging
 from flask import Flask, request, jsonify
 
-# ==================== CONFIGURACIÓN DE LOGGING ====================
+# ==================== LOGGER (BIEN CONFIGURADO) ====================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,13 @@ if not TELEGRAM_TOKEN:
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ==================== HANDLERS ====================
+# ==================== SALUDO INDEPENDIENTE ====================
 @bot.message_handler(func=lambda m: m.text and m.text.lower() in ["hola", "epa", "hey"])
 def handle_saludo(m):
     bot.send_message(m.chat.id, "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠")
     logger.info(f"✅ Saludo respondido a {m.chat.id}")
 
+# ==================== HANDLER PRINCIPAL ====================
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     chat_id = m.chat.id
