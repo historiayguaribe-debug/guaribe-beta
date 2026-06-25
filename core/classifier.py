@@ -6,21 +6,51 @@ from sklearn.ensemble import RandomForestClassifier
 MODEL_PATH = "data/classifier.pkl"
 
 EJEMPLOS_INICIALES = [
+    # Saludos
     ("Hola", "saludo"),
     ("Buenos días", "saludo"),
     ("¿Cómo estás?", "saludo"),
+    
+    # Simples
     ("Tasa BCV", "simple"),
     ("Cuánto está el dólar", "simple"),
     ("2+2", "simple"),
+    ("Cuánto es 15+27", "simple"),
+    
+    # Complejas (política, economía)
     ("Analiza la guerra híbrida", "compleja"),
     ("¿Qué opinas de Maduro?", "compleja"),
+    ("Explica el bloqueo económico a Venezuela", "compleja"),
+    
+    # Creativas
     ("Dame un poema", "creativa"),
     ("Escribe un manifiesto", "creativa"),
+    
+    # Noticias
     ("Noticias de hoy", "noticias"),
     ("¿Qué pasó en Venezuela?", "noticias"),
+    
+    # Preguntas sobre personas
     ("Quién es María Corina Machado", "pregunta_persona"),
+    ("Quién es el presidente de Venezuela", "pregunta_persona"),
+    
+    # Imagen
     ("Genera una imagen de un paisaje", "imagen"),
+    
+    # Archivo
     ("Subo un PDF", "archivo"),
+    
+    # === NUEVOS EJEMPLOS CULTURALES ===
+    ("Cuéntame algo sobre el llano venezolano", "cultural"),
+    ("Qué es la cultura venezolana", "cultural"),
+    ("Historia de Venezuela", "cultural"),
+    ("Tradiciones venezolanas", "cultural"),
+    ("Cómo se hace una arepa", "cultural"),
+    ("Qué es el joropo", "cultural"),
+    ("Quién fue Simón Bolívar", "cultural"),
+    ("Qué es el folklore venezolano", "cultural"),
+    ("Dónde queda el llano", "cultural"),
+    ("Costumbres de los llaneros", "cultural"),
 ]
 
 class Clasificador:
@@ -59,12 +89,17 @@ class Clasificador:
         if not texto or len(texto) < 2:
             return "simple"
         texto = texto.lower().strip()
-        if any(p in texto for p in ["hola", "buen", "saludos", "que tal", "como estas"]):
+        # Reglas rápidas para saludos y culturales (por si el modelo falla)
+        if any(p in texto for p in ["hola", "buen", "saludos", "que tal"]):
             return "saludo"
+        # Detectar palabras clave culturales como respaldo
+        if any(p in texto for p in ["llano", "cultura", "historia", "tradición", "venezolano", "costumbre"]):
+            return "cultural"
         try:
             X = self.vectorizer.transform([texto])
             return self.clf.predict(X)[0]
         except:
+            # Fallback por reglas
             if "tasa" in texto or "dólar" in texto or "bcv" in texto:
                 return "simple"
             if "noticias" in texto or "qué pasó" in texto:
@@ -87,5 +122,4 @@ class Clasificador:
                 self.entrenar()
                 self.contador = 0
 
-# === ESTA LÍNEA ES CLAVE ===
 clasificador = Clasificador()
