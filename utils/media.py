@@ -3,10 +3,9 @@ from io import BytesIO
 from PIL import Image
 from gtts import gTTS
 import os
-import logging
+from utils.logger import logger
 
-logger = logging.getLogger(__name__)
-
+# ==================== IMÁGENES (POLLINATIONS) ====================
 def generar_imagen(prompt: str, tipo: str = "general") -> BytesIO:
     """Genera imagen con Pollinations.ai (gratis)."""
     try:
@@ -18,14 +17,15 @@ def generar_imagen(prompt: str, tipo: str = "general") -> BytesIO:
         url = f"https://image.pollinations.ai/prompt/{prompt_limpio}?width=1024&height=1024&nologo=true"
         r = requests.get(url, timeout=60)
         if r.status_code == 200 and r.content:
+            logger.info(f"🎨 Imagen generada: {prompt[:30]}...")
             return BytesIO(r.content)
         return None
     except Exception as e:
         logger.error(f"Error generando imagen: {e}")
         return None
 
+# ==================== AUDIO (gTTS) ====================
 def generar_audio(texto: str) -> BytesIO:
-    """Genera audio con gTTS (gratis)."""
     try:
         tts = gTTS(text=texto[:500], lang='es', slow=False)
         audio_data = BytesIO()
@@ -36,11 +36,8 @@ def generar_audio(texto: str) -> BytesIO:
         logger.error(f"Error generando audio: {e}")
         return None
 
+# ==================== TRANSCRIPCIÓN DE AUDIO (WHISPER) ====================
 def transcribir_audio(data: bytes, groq_client) -> str:
-    """
-    Transcribe audio con Whisper de Groq (gratis).
-    Función dummy para evitar errores de importación.
-    """
     if not groq_client:
         return None
     try:
