@@ -15,14 +15,6 @@ contadores = {
     "actualidad": 0,
 }
 
-# ==================== PESOS DE MODELOS (se actualizan con feedback) ====================
-pesos_modelos = {
-    "grok": 1.0,
-    "mistral": 1.0,
-    "cohere": 0.5,
-    "ernie": 0.8,
-}
-
 # ==================== FECHA ACTUAL ====================
 FECHA_ACTUAL = datetime.now().strftime('%d de %B de %Y')
 
@@ -34,48 +26,24 @@ Eres alegre pero con carácter. Tienes opinión, no repites consignas.
 """
 
 def elegir_modelo(categoria: str) -> str:
-    """
-    Elige un modelo según la categoría y la rotación.
-    """
     contadores[categoria] += 1
     turno = contadores[categoria]
 
     if categoria == "simple":
-        # Groq siempre, pero cada 5 usa Mistral
-        if turno % 5 == 0:
-            return "mistral"
-        return "grok"
-
+        return "mistral" if turno % 5 == 0 else "grok"
     elif categoria == "creativa":
-        # Mistral principal, cada 3 prueba Cohere
-        if turno % 3 == 0:
-            return "cohere"
-        return "mistral"
-
+        return "cohere" if turno % 3 == 0 else "mistral"
     elif categoria == "compleja":
-        # Alterna entre ERNIE y Mistral
-        if turno % 2 == 0:
-            return "ernie"
-        return "mistral"
-
+        return "ernie" if turno % 2 == 0 else "mistral"
     elif categoria == "cultural":
-        # ERNIE principal, cada 3 prueba Mistral
-        if turno % 3 == 0:
-            return "mistral"
-        return "ernie"
-
+        return "mistral" if turno % 3 == 0 else "ernie"
     elif categoria == "actualidad":
-        # Groq con búsqueda, cada 5 prueba Mistral
-        if turno % 5 == 0:
-            return "mistral"
-        return "grok"
-
-    # Por defecto, round-robin entre grok, mistral, cohere
-    modelos = ["grok", "mistral", "cohere"]
-    return modelos[turno % len(modelos)]
+        return "mistral" if turno % 5 == 0 else "grok"
+    else:
+        modelos = ["grok", "mistral", "cohere"]
+        return modelos[turno % len(modelos)]
 
 def llamar_modelo_por_nombre(nombre: str, mensajes: List[Dict]) -> str:
-    """Llama al modelo correspondiente por nombre."""
     if nombre == "grok":
         return llamar_grok(mensajes)
     elif nombre == "mistral":
@@ -87,59 +55,43 @@ def llamar_modelo_por_nombre(nombre: str, mensajes: List[Dict]) -> str:
     else:
         return None
 
-def orquestar(consulta: str, categoria: str, contexto: List[str], perfil: Dict) -> str:
+def orquestar(consulta: str, categoria: str, historial: List[Dict], perfil: Dict) -> str:
     logger.info("🔄 Orquestador llamado con categoría: %s", categoria)
 
     if categoria == "saludo":
         return "¡Hola! Soy Guaribe. ¿En qué te ayudo hoy? 🤠"
 
-    # Elegir modelo según rotación
     modelo_elegido = elegir_modelo(categoria)
-    logger.info(f"🎯 Modelo elegido para {categoria}: {modelo_elegido}")
+    logger.info(f"🎯 Modelo elegido: {modelo_elegido}")
 
-    # Si es actualidad, buscar en web primero
+    # Construir mensajes con historial
+    system_prompt = PROMPT_BASE + "\n\nResponde de forma breve y precisa."
+    mensajes = [{"role": "system", "content": system_prompt}]
+
+    # Agregar historial (preguntas y respuestas anteriores)
+    for msg in historial:
+        mensajes.append({"role": msg["role"], "content": msg["content"]})
+
+    # Agregar la consulta actual
+    mensajes.append({"role": "user", "content": consulta})
+
+    # Si es actualidad, buscar en web y añadir al prompt
     if categoria in ["actualidad", "noticias"]:
         logger.info("🌐 Buscando en web: %s", consulta)
         resultados = buscar_en_web(consulta, limite=3)
-
         if resultados:
             contexto_web = "\n".join([f"- {r}" for r in resultados])
-            system_prompt = PROMPT_BASE + f"""
-            \n\nInformación actualizada encontrada en la web:
-            {contexto_web}
-
-            Usa esta información para responder al usuario. Si la información no es suficiente, indica que no encontraste datos actualizados.
-            """
+            mensajes.insert(1, {"role": "system", "content": f"Información actualizada encontrada en la web:\n{contexto_web}"})
         else:
-            system_prompt = PROMPT_BASE + "\n\nNo encontré información actualizada sobre tu pregunta en la web. Responde con lo que sepas, y sugiere al usuario que intente reformular la pregunta."
+            mensajes.insert(1, {"role": "system", "content": "No encontré información actualizada en la web."})
 
-        mensajes = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": consulta}
-        ]
-        respuesta = llamar_modelo_por_nombre(modelo_elegido, mensajes)
-        if respuesta:
-            logger.info(f"✅ {modelo_elegido} respondió (actualidad)")
-            return respuesta
-        # Fallback a Groq si el modelo elegido falla
-        logger.warning(f"⚠️ {modelo_elegido} falló, usando Groq como fallback")
-        respuesta = llamar_grok(mensajes)
-        if respuesta:
-            return respuesta
-        return "Pana, no pude obtener información actualizada. Intenta más tarde. 🙏"
-
-    # Flujo normal
-    system_prompt = PROMPT_BASE + "\n\nResponde de forma breve y precisa."
-    mensajes = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": consulta}
-    ]
+    # Llamar al modelo
     respuesta = llamar_modelo_por_nombre(modelo_elegido, mensajes)
     if respuesta:
         logger.info(f"✅ {modelo_elegido} respondió correctamente")
         return respuesta
 
-    # Fallback: intentar con Groq
+    # Fallback a Groq
     logger.warning(f"⚠️ {modelo_elegido} falló, usando Groq como fallback")
     respuesta = llamar_grok(mensajes)
     if respuesta:
