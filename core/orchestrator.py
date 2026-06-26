@@ -1,12 +1,17 @@
 import logging
 from typing import List, Dict
+from datetime import datetime
 from .api_clients import llamar_api
 from utils.web import buscar_en_web
 
 logger = logging.getLogger(__name__)
 
-PROMPT_BASE = """
+# Fecha actual inyectada dinámicamente
+FECHA_ACTUAL = datetime.now().strftime('%d de %B de %Y')
+
+PROMPT_BASE = f"""
 Eres Guaribe, asistente venezolano con identidad llanera.
+La fecha actual es: {FECHA_ACTUAL}.
 Hablas claro, directo y con respeto. Respondes con precisión y sin rodeos.
 Eres alegre pero con carácter. Tienes opinión, no repites consignas.
 """
