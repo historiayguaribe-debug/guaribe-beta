@@ -2,10 +2,10 @@ import os
 import requests
 import logging
 from typing import List, Dict, Optional
-from groq import Groq
 
 logger = logging.getLogger(__name__)
 
+# ==================== CLAVES ====================
 GROQ_API_KEYS = os.environ.get("GROQ_API_KEY", "").split(",")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
 COHERE_API_KEY = os.environ.get("COHERE_API_KEY")
@@ -15,6 +15,7 @@ GITHUB_MODELS_KEY = os.environ.get("GITHUB_MODELS_KEY")
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+# ==================== GROQ ====================
 def llamar_grok(mensajes: List[Dict], timeout: int = 10) -> Optional[str]:
     for idx, key in enumerate(GROQ_API_KEYS):
         key = key.strip()
@@ -32,6 +33,7 @@ def llamar_grok(mensajes: List[Dict], timeout: int = 10) -> Optional[str]:
             continue
     return None
 
+# ==================== MISTRAL ====================
 def llamar_mistral(mensajes: List[Dict], timeout: int = 15) -> Optional[str]:
     if not MISTRAL_API_KEY:
         return None
@@ -39,7 +41,7 @@ def llamar_mistral(mensajes: List[Dict], timeout: int = 15) -> Optional[str]:
         url = "https://api.mistral.ai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "mistral-small-4",
+            "model": "mistral-small-latest",
             "messages": mensajes,
             "max_tokens": 500,
             "temperature": 0.7
@@ -52,14 +54,14 @@ def llamar_mistral(mensajes: List[Dict], timeout: int = 15) -> Optional[str]:
         logger.warning(f"Mistral falló: {e}")
         return None
 
+# ==================== ORQUESTADOR DE APIS ====================
 def llamar_api(mensajes: List[Dict], categoria: str = "simple") -> Optional[str]:
-    proveedores = [
-        ("grok", llamar_grok),
-        ("mistral", llamar_mistral),
-    ]
+    # Priorizar Mistral para complejas/culturales
     if categoria in ["compleja", "cultural"]:
         proveedores = [("mistral", llamar_mistral), ("grok", llamar_grok)]
-    
+    else:
+        proveedores = [("grok", llamar_grok), ("mistral", llamar_mistral)]
+
     for nombre, funcion in proveedores:
         logger.info(f"🔄 Intentando con {nombre}...")
         respuesta = funcion(mensajes)
@@ -67,6 +69,6 @@ def llamar_api(mensajes: List[Dict], categoria: str = "simple") -> Optional[str]
             logger.info(f"✅ {nombre} respondió correctamente")
             return respuesta
         logger.warning(f"⚠️ {nombre} falló, probando siguiente...")
-    
+
     logger.error("❌ Todas las APIs fallaron")
     return None
