@@ -21,13 +21,13 @@ def orquestar(consulta: str, categoria: str, contexto: List[str], perfil: Dict) 
     if categoria in ["actualidad", "noticias"]:
         logger.info("🌐 Buscando en web: %s", consulta)
         resultados = buscar_en_web(consulta, limite=3)
-        
+
         if resultados:
             contexto_web = "\n".join([f"- {r}" for r in resultados])
             system_prompt = PROMPT_BASE + f"""
             \n\nInformación actualizada encontrada en la web:
             {contexto_web}
-            
+
             Usa esta información para responder al usuario. Si la información no es suficiente, indica que no encontraste datos actualizados.
             """
         else:
