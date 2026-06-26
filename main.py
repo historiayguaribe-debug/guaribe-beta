@@ -5,19 +5,17 @@ import os
 import time
 import telebot
 from flask import Flask, request, jsonify
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from utils.logger import logger
 
-# ==================== CONFIGURACIÓN ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN no configurado")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-logger.info("✅ Bot de Telegram inicializado")
 
 # ==================== MENÚ ====================
 def menu_principal():
-    from telebot.types import ReplyKeyboardMarkup, KeyboardButton
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
         KeyboardButton("💰 Tasa BCV"),
@@ -34,11 +32,10 @@ def cmd_start(m):
         "¡Epale! Soy **Guaribe**, tu asistente llanero.\n\n"
         "Usa los botones:\n"
         "💰 Tasa BCV\n📰 Noticias\n🔮 Analizar\n🎙️ Voz\n\n"
-        "🎨 Puedes pedirme imágenes: 'genera una imagen de...'\n"
-        "📰 Noticias: 'noticias' o 'qué pasó hoy'\n"
-        "🔮 Análisis: 'analiza' o 'analizar'\n"
-        "📸 Envía fotos para analizar.\n"
-        "🎙️ Envía mensajes de voz.\n\n"
+        "🎨 Puedes pedirme imágenes con 'genera una imagen de...'.\n"
+        "📸 Envía fotos para que las analice.\n"
+        "🎙️ Envía mensajes de voz.\n"
+        "👍/👎 Califica mis respuestas.\n\n"
         "¡Seguimos razonando! 🇻🇪🤠🏛️",
         parse_mode='Markdown', reply_markup=menu_principal()
     )
@@ -54,46 +51,51 @@ def handle_message(m):
     texto = m.text or ""
     if not texto or len(texto) < 2:
         return
-    
+
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
-    
+
     try:
-        # Importar módulos
-        from core.classifier import clasificador
         from core.orchestrator import orquestar
-        from utils.web import obtener_tasa, buscar_noticias
-        from utils.media import generar_imagen
-        
-        # Detectar acciones rápidas (sin clasificador)
-        if "tasa" in texto.lower() or "bcv" in texto.lower() or "dólar" in texto.lower():
-            bot.send_message(chat_id, obtener_tasa(), parse_mode='Markdown')
-            return
-        
-        if "noticias" in texto.lower() or "qué pasó" in texto.lower():
-            bot.send_message(chat_id, buscar_noticias(), parse_mode='Markdown')
-            return
-        
-        if "genera" in texto.lower() and ("imagen" in texto.lower() or "dibujo" in texto.lower()):
-            bot.send_message(chat_id, "🎨 Generando imagen... (puede tomar unos segundos)")
-            img = generar_imagen(texto)
-            if img:
-                bot.send_photo(chat_id, img, caption=f"🎨 *{texto[:50]}...*", parse_mode='Markdown')
-            else:
-                bot.send_message(chat_id, "❌ No pude generar la imagen. Intenta con otro prompt.")
-            return
-        
+        from core.classifier import clasificador
+        logger.info("✅ Orquestador y clasificador importados")
+
         # Clasificar
         categoria = clasificador.clasificar(texto)
         logger.info(f"📋 Categoría: {categoria}")
-        
-        # Orquestar
+
+        # Obtener respuesta
         respuesta = orquestar(texto, categoria, [], {})
-        bot.send_message(chat_id, respuesta, parse_mode='Markdown')
+        logger.info(f"✅ Respuesta: {respuesta[:50]}...")
+
+        # Enviar con Markdown, y si falla, sin formato
+        try:
+            sent_msg = bot.send_message(chat_id, respuesta, parse_mode='Markdown')
+        except Exception as e:
+            logger.warning(f"⚠️ Error con Markdown, enviando sin formato: {e}")
+            sent_msg = bot.send_message(chat_id, respuesta)
+
+        # Feedback
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton("👍", callback_data=f"fb_{sent_msg.message_id}_1"),
+            InlineKeyboardButton("👎", callback_data=f"fb_{sent_msg.message_id}_-1")
+        )
+        bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
+
         logger.info(f"✅ Respuesta enviada a {chat_id}")
-        
+
     except Exception as e:
         logger.error(f"❌ Error en handle_message: {e}")
         bot.send_message(chat_id, "Pana, hubo un error. Intenta de nuevo. 🙏")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('fb_'))
+def handle_feedback(call):
+    try:
+        _, msg_id, puntuacion = call.data.split('_')
+        bot.answer_callback_query(call.id, "¡Gracias por tu feedback! 👍")
+        bot.edit_message_reply_markup(call.message.chat.id, int(msg_id), reply_markup=None)
+    except Exception as e:
+        logger.error(f"❌ Error en feedback: {e}")
 
 # ==================== FLASK ====================
 app = Flask(__name__)
@@ -110,7 +112,7 @@ def webhook():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "bot": "Guaribe Beta 2.0"}), 200
+    return jsonify({"status": "ok", "bot": "Guaribe Beta"}), 200
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
@@ -123,7 +125,6 @@ def set_webhook():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ==================== EJECUCIÓN ====================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
