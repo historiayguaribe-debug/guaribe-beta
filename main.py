@@ -4,8 +4,11 @@ monkey.patch_all()
 import os
 import time
 import telebot
+import threading
 from flask import Flask, request, jsonify
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+
+# Importar el logger centralizado
 from utils.logger import logger
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -14,7 +17,7 @@ if not TELEGRAM_TOKEN:
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ==================== MENÚ ====================
+# ==================== MENÚ PRINCIPAL ====================
 def menu_principal():
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
@@ -55,32 +58,71 @@ def handle_message(m):
     logger.info(f"📩 Mensaje de {chat_id}: {texto[:50]}...")
 
     try:
+        # --- DETECCIÓN DE IMAGEN (antes de cargar módulos pesados) ---
+        if "genera" in texto.lower() and ("imagen" in texto.lower() or "dibujo" in texto.lower()):
+            logger.info("🎨 Generando imagen...")
+            try:
+                from utils.media import generar_imagen
+                img = generar_imagen(texto)
+                if img:
+                    bot.send_photo(chat_id, img, caption=f"🎨 *{texto[:50]}...*", parse_mode='Markdown')
+                else:
+                    bot.send_message(chat_id, "❌ No pude generar la imagen. Intenta con otro prompt.")
+            except Exception as e:
+                logger.error(f"❌ Error generando imagen: {e}")
+                bot.send_message(chat_id, "❌ No pude generar la imagen. Intenta con otro prompt.")
+            return
+
+        # --- CARGAR MÓDULOS ---
         from core.orchestrator import orquestar
         from core.classifier import clasificador
+        from core.memory import obtener_historia, get_connection, guardar_mensaje
         logger.info("✅ Orquestador y clasificador importados")
 
-        # Clasificar
+        # --- CLASIFICAR ---
         categoria = clasificador.clasificar(texto)
         logger.info(f"📋 Categoría: {categoria}")
 
-        # Obtener respuesta
-        respuesta = orquestar(texto, categoria, [], {})
+        # --- RECUPERAR HISTORIAL (si memoria disponible) ---
+        historia = []
+        try:
+            conn = get_connection()
+            historia = obtener_historia(chat_id, limite=6)  # Últimos 3 intercambios
+            conn.close()
+            logger.info(f"📜 Historial recuperado: {len(historia)} mensajes")
+        except Exception as e:
+            logger.warning(f"Error obteniendo historial: {e}")
+
+        # --- ORQUESTAR RESPUESTA ---
+        respuesta = orquestar(texto, categoria, historia, {})
         logger.info(f"✅ Respuesta: {respuesta[:50]}...")
 
-        # Enviar con Markdown, y si falla, sin formato
+        # --- ENVIAR RESPUESTA (con fallback si falla el Markdown) ---
         try:
             sent_msg = bot.send_message(chat_id, respuesta, parse_mode='Markdown')
         except Exception as e:
             logger.warning(f"⚠️ Error con Markdown, enviando sin formato: {e}")
             sent_msg = bot.send_message(chat_id, respuesta)
 
-        # Feedback
+        # --- FEEDBACK ---
         markup = InlineKeyboardMarkup()
         markup.add(
             InlineKeyboardButton("👍", callback_data=f"fb_{sent_msg.message_id}_1"),
             InlineKeyboardButton("👎", callback_data=f"fb_{sent_msg.message_id}_-1")
         )
         bot.edit_message_reply_markup(chat_id, sent_msg.message_id, reply_markup=markup)
+
+        # --- GUARDAR EN MEMORIA (async) ---
+        def guardar():
+            try:
+                conn = get_connection()
+                guardar_mensaje(chat_id, "usuario", texto, conn)
+                guardar_mensaje(chat_id, "asistente", respuesta, conn)
+                conn.close()
+                logger.info(f"💾 Mensaje guardado para {chat_id}")
+            except Exception as e:
+                logger.warning(f"Error guardando mensaje: {e}")
+        threading.Thread(target=guardar).start()
 
         logger.info(f"✅ Respuesta enviada a {chat_id}")
 
@@ -125,15 +167,32 @@ def set_webhook():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ==================== PRECARGA DE MEMORIA (en segundo plano) ====================
+def precargar_memoria():
+    try:
+        from core.memory import get_connection
+        logger.info("🔄 Precargando memoria en segundo plano...")
+        # La conexión se establece sin hacer nada pesado
+        conn = get_connection()
+        conn.close()
+        logger.info("✅ Memoria precargada")
+    except Exception as e:
+        logger.warning(f"Error precargando memoria: {e}")
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url="https://guaribe-beta.onrender.com/webhook")
+    # Precargar memoria en segundo plano
+    threading.Thread(target=precargar_memoria).start()
     app.run(host='0.0.0.0', port=port)
 else:
+    # En producción con Gunicorn
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url="https://guaribe-beta.onrender.com/webhook")
     logger.info("✅ Webhook configurado en producción")
+    # Precargar memoria en segundo plano
+    threading.Thread(target=precargar_memoria).start()
     logger.info("✅ Servidor listo para recibir peticiones")
