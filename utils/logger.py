@@ -1,10 +1,18 @@
 import logging
+import sys
 
-# ==================== CONFIGURACIÓN DEL LOGGER ====================
+# Configuración del logger con flush inmediato
+class InmediateStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        InmediateStreamHandler(stream=sys.stdout)
+    ]
 )
 
-# Logger global para todo el proyecto
 logger = logging.getLogger("Guaribe")
